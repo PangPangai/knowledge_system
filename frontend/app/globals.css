@@ -1,0 +1,195 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@import "tailwindcss";
+@plugin '@tailwindcss/typography';
+
+:root {
+  /* 
+    Minimalist Theme - Inspired by Minimax/Hailuo 
+    Core Philosophy: Content-first, No-borders, Soft Shadows
+  */
+
+  /* Backgrounds */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f7f7f8;
+  /* Sidebar & Message Bubbles */
+  --bg-tertiary: #f0f0f2;
+  /* Hover states */
+
+  /* Text */
+  --text-primary: #1f2329;
+  --text-secondary: #646a73;
+  --text-tertiary: #8f959e;
+
+  /* Accents (Hailuo Purple/Blue) */
+  --accent-primary: #6366f1;
+  /* Indigo-500 */
+  --accent-secondary: #4f46e5;
+  /* Indigo-600 */
+  --accent-light: #e0e7ff;
+
+  /* Borders - Minimal usage */
+  --border-subtle: #ebecf0;
+
+  /* Shadows - The key to "floating" UI */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-float: 0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
+  --shadow-island: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 8px rgba(0, 0, 0, 0.04);
+
+  /* Radius */
+  --radius-bubble: 18px;
+  --radius-island: 24px;
+}
+
+@layer base {
+  body {
+    @apply bg-[var(--bg-primary)] text-[var(--text-primary)] antialiased;
+    font-family: 'Inter', -apple-system, sans-serif;
+  }
+}
+
+/* 
+   UI Components 
+*/
+
+/* 1. Sidebar */
+.sidebar {
+  @apply bg-[var(--bg-secondary)] border-r border-[var(--border-subtle)] h-screen w-[260px] flex flex-col transition-all duration-300;
+}
+
+.sidebar-item {
+  @apply px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] cursor-pointer transition-colors truncate;
+}
+
+.sidebar-item.active {
+  @apply bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium;
+}
+
+/* 2. Chat Area */
+.chat-container {
+  @apply flex-1 flex flex-col h-screen relative;
+}
+
+/* 3. Message Bubbles */
+.msg-container {
+  @apply max-w-3xl mx-auto w-full px-4;
+}
+
+/* User Bubble - Minimal Gray */
+.msg-user {
+  @apply bg-[var(--bg-secondary)] text-[var(--text-primary)] px-5 py-3 rounded-[var(--radius-bubble)] rounded-tr-sm inline-block max-w-[85%];
+}
+
+/* Assistant - No background, just text */
+.msg-assistant {
+  @apply text-[var(--text-primary)] leading-relaxed w-full;
+}
+
+/* 4. Floating Input Island - Fixed at bottom of chat area */
+.input-island-wrapper {
+  @apply absolute bottom-0 left-0 right-0 w-full max-w-3xl mx-auto px-4 z-50;
+}
+
+.input-island {
+  @apply bg-white border border-[var(--border-subtle)] shadow-[var(--shadow-island)] rounded-[var(--radius-island)] p-2 pl-4 flex items-end gap-2 transition-all duration-300;
+}
+
+.input-island:focus-within {
+  @apply border-[var(--accent-primary)] ring-1 ring-[var(--accent-primary)];
+}
+
+.input-island textarea {
+  @apply w-full bg-transparent border-none outline-none focus:ring-0 focus:outline-none resize-none max-h-[200px] py-3 text-[15px] leading-relaxed placeholder:text-[var(--text-tertiary)];
+}
+
+/* 5. Buttons */
+.btn-send {
+  @apply bg-[var(--accent-primary)] text-white w-9 h-9 rounded-full flex items-center justify-center transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed mb-1;
+}
+
+.btn-icon {
+  @apply p-2 rounded-full text-[var(--text-tertiary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] transition-colors;
+}
+
+/* 6. Typography in Markdown */
+.prose {
+  @apply text-[15px] leading-7;
+}
+
+.prose h1,
+.prose h2,
+.prose h3 {
+  @apply font-semibold text-[var(--text-primary)] mt-6 mb-3;
+}
+
+.prose p {
+  @apply mb-4;
+}
+
+.prose code {
+  @apply bg-[var(--bg-secondary)] px-1.5 py-0.5 rounded text-sm text-[#eb5757] font-normal font-mono;
+}
+
+.prose pre {
+  @apply bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-xl p-4 overflow-x-auto my-4 text-sm text-[var(--text-primary)];
+}
+
+/* Table styles - prevent vertical text */
+.prose table {
+  @apply w-full border-collapse my-4 text-sm;
+}
+
+.prose th,
+.prose td {
+  @apply border border-[var(--border-subtle)] px-3 py-2 text-left;
+  min-width: 80px;
+  /* Prevent columns from being too narrow */
+  white-space: normal;
+  word-break: normal;
+}
+
+.prose th {
+  @apply bg-[var(--bg-secondary)] font-semibold;
+}
+
+.prose th:first-child,
+.prose td:first-child {
+  min-width: 100px;
+  /* First column needs more space for Chinese labels */
+}
+
+/* 7. Source Cards */
+.source-card {
+  @apply bg-white border border-[var(--border-subtle)] rounded-xl p-3 text-xs shadow-sm hover:shadow-md transition-shadow cursor-default min-w-[200px] max-w-[240px] flex-shrink-0;
+}
+
+/* 8. Animations */
+@keyframes slideUpFade {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slideUpFade 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-200 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-300;
+}

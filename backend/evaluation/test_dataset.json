@@ -1,0 +1,147 @@
+{
+    "version": "1.0",
+    "description": "EDA/Fusion Compiler知识库评估测试集",
+    "created": "2026-02-02",
+    "test_cases": [
+        {
+            "id": "fc_basic_001",
+            "question": "什么是Fusion Compiler?",
+            "ground_truth_answer": "Fusion Compiler是Synopsys的物理设计工具，用于芯片的布局布线(Place and Route)。",
+            "category": "basic",
+            "difficulty": "easy"
+        },
+        {
+            "id": "fc_basic_002",
+            "question": "FC中如何打开一个设计?",
+            "ground_truth_answer": "使用open_lib命令打开库，然后使用open_block命令打开设计block。",
+            "category": "how-to",
+            "difficulty": "easy"
+        },
+        {
+            "id": "fc_flow_001",
+            "question": "Fusion Compiler的主要设计流程包括哪些步骤?",
+            "ground_truth_answer": "FC的设计流程包括: 数据准备(data preparation)、floorplan、placement、CTS(时钟树综合)、routing和signoff。",
+            "category": "concept",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_congestion_001",
+            "question": "在FC中如何解决congestion问题?",
+            "ground_truth_answer": "可以使用set_app_options来配置拥塞优化选项，启用DCDPv2算法，调整placement density等方法来优化congestion。",
+            "category": "how-to",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_timing_001",
+            "question": "如何在FC中修复setup timing违例?",
+            "ground_truth_answer": "可以使用optimize_timing命令，设置timing effort为high，或者使用size_cell进行cell sizing优化。",
+            "category": "how-to",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_cts_001",
+            "question": "FC中CTS的基本流程是什么?",
+            "ground_truth_answer": "CTS流程包括clock tree synthesis、clock tree optimization和clock tree routing，使用compile_clock_tree命令执行。",
+            "category": "concept",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_routing_001",
+            "question": "FC中如何进行详细布线?",
+            "ground_truth_answer": "使用route_auto或route_detail命令进行详细布线，可以设置routing options来控制布线行为。",
+            "category": "how-to",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_drc_001",
+            "question": "如何在FC中检查和修复DRC违例?",
+            "ground_truth_answer": "使用check_design检查DRC违例，使用route_detail -fix_drc命令修复布线DRC问题。",
+            "category": "how-to",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_power_001",
+            "question": "FC中如何进行power分析?",
+            "ground_truth_answer": "使用report_power命令进行功耗分析，可以设置switching activity来获得更准确的功耗估算。",
+            "category": "how-to",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_floorplan_001",
+            "question": "如何在FC中创建floorplan?",
+            "ground_truth_answer": "使用initialize_floorplan命令创建floorplan，设置die size、core area、row configuration等参数。",
+            "category": "how-to",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_placement_001",
+            "question": "FC中placement的主要命令是什么?",
+            "ground_truth_answer": "使用create_placement命令进行initial placement，使用place_opt进行placement optimization。",
+            "category": "how-to",
+            "difficulty": "easy"
+        },
+        {
+            "id": "fc_report_001",
+            "question": "如何生成timing报告?",
+            "ground_truth_answer": "使用report_timing命令生成timing报告，可以指定path group、max paths数量等选项。",
+            "category": "how-to",
+            "difficulty": "easy"
+        },
+        {
+            "id": "fc_advanced_001",
+            "question": "FC中multi-voltage设计流程是怎样的?",
+            "ground_truth_answer": "需要设置voltage area，定义power domains，插入level shifter和isolation cells，配置UPF。",
+            "category": "advanced",
+            "difficulty": "hard"
+        },
+        {
+            "id": "fc_advanced_002",
+            "question": "如何在FC中使用NDR进行关键信号布线?",
+            "ground_truth_answer": "使用create_routing_rule定义NDR规则，然后将其应用到特定net group上进行布线。",
+            "category": "advanced",
+            "difficulty": "hard"
+        },
+        {
+            "id": "fc_no_answer_001",
+            "question": "FC支持FinFET工艺优化吗?",
+            "ground_truth_answer": "文档中可能没有详细描述此内容，需要检查是否能诚实回答。",
+            "category": "no-answer",
+            "difficulty": "test"
+        },
+        {
+            "id": "fc_abbrev_001",
+            "question": "什么是CTS?",
+            "ground_truth_answer": "CTS是Clock Tree Synthesis的缩写，即时钟树综合，用于构建时钟分配网络。",
+            "category": "abbreviation",
+            "difficulty": "easy"
+        },
+        {
+            "id": "fc_abbrev_002",
+            "question": "PNR是什么意思?",
+            "ground_truth_answer": "PNR是Place and Route的缩写，即布局布线，是物理设计的核心流程。",
+            "category": "abbreviation",
+            "difficulty": "easy"
+        },
+        {
+            "id": "fc_compare_001",
+            "question": "FC和ICC2有什么区别?",
+            "ground_truth_answer": "Fusion Compiler是Synopsys的下一代物理设计工具，相比ICC2具有更好的QoR和性能。",
+            "category": "comparison",
+            "difficulty": "medium"
+        },
+        {
+            "id": "fc_debug_001",
+            "question": "如何调试routing失败的问题?",
+            "ground_truth_answer": "可以查看route_auto的log输出，检查unrouted nets，分析是否有blockage或pin access问题。",
+            "category": "debug",
+            "difficulty": "hard"
+        },
+        {
+            "id": "fc_optimize_001",
+            "question": "如何优化设计的area?",
+            "ground_truth_answer": "可以使用area_recovery选项，调整utilization目标，使用legalize_placement进行优化。",
+            "category": "optimization",
+            "difficulty": "medium"
+        }
+    ]
+}
