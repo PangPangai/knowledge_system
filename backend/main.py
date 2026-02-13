@@ -7,24 +7,25 @@ import os
 import json
 from dotenv import load_dotenv
 
-from dotenv import load_dotenv
-
 from rag_engine import RAGEngine
+from task_manager import TaskManager
 
 # Load environment variables
 load_dotenv(override=True)
 
 from contextlib import asynccontextmanager
 
-# Global RAG engine instance
+# Global instances
 rag_engine = None
+task_manager = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global rag_engine
-    # Initialize RAG engine on startup
+    global rag_engine, task_manager
+    # Initialize on startup
     print("🚀 Starting up RAG Engine...")
     rag_engine = RAGEngine()
+    task_manager = TaskManager()
     yield
     # Cleanup on shutdown
     print("🛑 Shutting down RAG Engine...")
@@ -60,6 +61,11 @@ class UploadResponse(BaseModel):
     status: str
     chunks_created: int
 
+class AsyncUploadResponse(BaseModel):
+    task_id: str
+    filename: str
+    status: str
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -69,41 +75,95 @@ async def health_check():
         "vector_db_status": "connected" if rag_engine.is_ready() else "initializing"
     }
 
-@app.post("/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload and process a document (PDF or Markdown)
-    """
-    # Check file extension
+
+def _validate_upload_file(filename: str) -> str:
+    """Validate file extension and return it. Raises HTTPException on invalid."""
     allowed_extensions = ['.pdf', '.md', '.markdown']
-    file_ext = '.' + file.filename.split('.')[-1].lower() if '.' in file.filename else ''
-    
+    file_ext = '.' + filename.split('.')[-1].lower() if '.' in filename else ''
     if file_ext not in allowed_extensions:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"Only PDF and Markdown files are supported. Got: {file_ext}"
         )
-    
+    return file_ext
+
+
+async def _save_upload_to_temp(file: UploadFile) -> str:
+    """Save uploaded file to a temp path using chunked streaming."""
+    temp_path = f"./temp_{file.filename}"
+    CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per chunk
+    with open(temp_path, "wb") as f:
+        while True:
+            chunk = await file.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            f.write(chunk)
+    return temp_path
+
+
+@app.post("/upload", response_model=AsyncUploadResponse)
+async def upload_document(file: UploadFile = File(...)):
+    """
+    Async upload: save file and return task_id immediately.
+    Document processing runs in background.
+    Poll GET /tasks/{task_id} for progress.
+    """
+    _validate_upload_file(file.filename)
+
     try:
-        # Save uploaded file temporarily
-        temp_path = f"./temp_{file.filename}"
-        with open(temp_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        
-        # Process document with RAG engine
+        temp_path = await _save_upload_to_temp(file)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    # Submit to background task manager
+    task_id = task_manager.submit(
+        filename=file.filename,
+        file_path=temp_path,
+        ingest_fn=rag_engine.ingest_document,
+    )
+
+    return AsyncUploadResponse(
+        task_id=task_id,
+        filename=file.filename,
+        status="pending",
+    )
+
+
+@app.post("/upload/sync", response_model=UploadResponse)
+async def upload_document_sync(file: UploadFile = File(...)):
+    """
+    Sync upload: wait for processing to complete before responding.
+    Use for small files or debugging.
+    """
+    _validate_upload_file(file.filename)
+
+    try:
+        temp_path = await _save_upload_to_temp(file)
         chunks_created = await rag_engine.ingest_document(temp_path, file.filename)
-        
-        # Clean up temp file
         os.remove(temp_path)
-        
+
         return UploadResponse(
             filename=file.filename,
             status="success",
-            chunks_created=chunks_created
+            chunks_created=chunks_created,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
+
+
+@app.get("/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    """Query background task status by id"""
+    result = task_manager.get_status(task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return result
+
+
+@app.get("/tasks")
+async def list_tasks():
+    """List all background tasks"""
+    return {"tasks": task_manager.list_tasks()}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -133,6 +193,42 @@ async def chat_stream(request: ChatRequest):
         try:
             async for chunk in rag_engine.query_stream(request.question, request.conversation_id):
                 # Send as SSE data
+                yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            error_msg = {"type": "error", "content": str(e)}
+            yield f"data: {json.dumps(error_msg)}\n\n"
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/chat/agentic", response_model=ChatResponse)
+async def chat_agentic(request: ChatRequest):
+    """
+    Ask a question using Agentic RAG (LangGraph-based)
+    LLM decides when to retrieve and iteratively improves results
+    """
+    try:
+        result = await rag_engine.query_agentic(
+            question=request.question,
+            conversation_id=request.conversation_id
+        )
+        
+        return ChatResponse(
+            answer=result["answer"],
+            sources=result["sources"],
+            conversation_id=result["conversation_id"]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agentic query failed: {str(e)}")
+
+@app.post("/chat/agentic/stream")
+async def chat_agentic_stream(request: ChatRequest):
+    """
+    Stream answer from Agentic RAG
+    SSE-compatible streaming with router → retrieve → grade → generate workflow
+    """
+    async def event_generator():
+        try:
+            async for chunk in rag_engine.query_agentic_stream(request.question, request.conversation_id):
                 yield f"data: {json.dumps(chunk)}\n\n"
         except Exception as e:
             error_msg = {"type": "error", "content": str(e)}
@@ -189,6 +285,22 @@ async def list_documents():
         return {"documents": documents}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+@app.post("/tools/discover")
+async def discover_tools():
+    """
+    Trigger automated tool discovery from existing documents.
+    Updates tools_config.json if new tools are found.
+    """
+    try:
+        new_tools = rag_engine._auto_discover_tools(scan_all=True)
+        return {
+            "status": "success",
+            "new_tools": new_tools,
+            "count": len(new_tools)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Discovery failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

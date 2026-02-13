@@ -3,9 +3,11 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import ExportButtons from './ExportButtons';
 
 interface Source {
     content: string;
+    full_content?: string;
     source: string;
     chunk_id: number;
     section: string;
@@ -28,6 +30,8 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [isStreaming, setIsStreaming] = useState(false); // Prevent message override during streaming
+    const [useAgenticRAG, setUseAgenticRAG] = useState(true); // Toggle for Agentic RAG
+    const [activeSource, setActiveSource] = useState<Source | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -85,8 +89,11 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
         setIsStreaming(true); // Prevent useEffect from overriding local messages
 
         try {
-            // Streaming implementation
-            const response = await fetch('http://localhost:8000/chat/stream', {
+            // Choose endpoint based on toggle (both now support streaming)
+            const endpoint = useAgenticRAG ? '/chat/agentic/stream' : '/chat/stream';
+
+            // Unified streaming logic for both modes
+            const response = await fetch(`http://localhost:8000${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -104,12 +111,20 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
             let assistantMessage: Message = { role: 'assistant', content: '', sources: [] };
             setMessages(prev => [...prev, assistantMessage]);
 
+            let buffer = '';
+
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n\n');
+                const chunk = decoder.decode(value, { stream: true });
+                buffer += chunk;
+
+                // Split by double newline which is the standard SSE separator
+                const lines = buffer.split('\n\n');
+
+                // Keep the last part in the buffer as it might be incomplete
+                buffer = lines.pop() || '';
 
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
@@ -123,6 +138,8 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                                 }
                             } else if (data.type === 'content') {
                                 assistantMessage.content += data.content;
+                            } else if (data.type === 'done') {
+                                // Stream finished signal
                             }
 
                             // Update UI
@@ -194,7 +211,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                                         <div className="whitespace-pre-wrap">{message.content}</div>
                                     </div>
                                 ) : (
-                                    <div className="msg-assistant w-full">
+                                    <div id={`qa-pair-${index}`} className="msg-assistant w-full group/msg">
                                         <div className="prose prose-slate max-w-none">
                                             {message.content ? (
                                                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
@@ -221,8 +238,13 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                                                 </div>
                                                 <div className="flex gap-3 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
                                                     {message.sources.map((source, idx) => (
-                                                        <div key={idx} className="source-card group transition-all hover:-translate-y-1">
-                                                            <div className="font-semibold text-[var(--accent-secondary)] mb-1.5 truncate">
+                                                        <div
+                                                            key={idx}
+                                                            onClick={() => setActiveSource(source)}
+                                                            className="source-card group transition-all hover:-translate-y-1 cursor-pointer hover:shadow-md hover:border-[var(--accent-primary)]/30 active:scale-95"
+                                                        >
+                                                            <div className="font-semibold text-[var(--accent-secondary)] mb-1.5 truncate flex items-center gap-1">
+                                                                <svg className="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
                                                                 {source.source.replace('.md', '').replace('.pdf', '')}
                                                             </div>
                                                             <div className="text-[var(--text-tertiary)] text-[10px] uppercase font-mono mb-2">
@@ -236,15 +258,44 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                                                 </div>
                                             </div>
                                         )}
+
+                                        {/* Export Buttons */}
+                                        {message.content && !isStreaming && (
+                                            <ExportButtons
+                                                question={messages[index - 1]?.content || ''}
+                                                answer={message.content}
+                                                answerId={`qa-pair-${index}`}
+                                            />
+                                        )}
                                     </div>
                                 )}
                             </div>
+
                         ))}
 
 
                         <div ref={messagesEndRef} />
                     </div>
                 )}
+            </div>
+
+            {/* RAG Mode Toggle - Minimalist top-right corner */}
+            <div className="fixed top-6 right-6 z-50">
+                <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)] select-none">
+                    <button
+                        onClick={() => setUseAgenticRAG(!useAgenticRAG)}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-all ${useAgenticRAG ? 'bg-[var(--accent-primary)]' : 'bg-gray-300'} hover:opacity-80`}
+                        disabled={isLoading}
+                        title={useAgenticRAG ? '当前：Agentic RAG' : '当前：传统 RAG'}
+                    >
+                        <span
+                            className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${useAgenticRAG ? 'translate-x-5' : 'translate-x-1'}`}
+                        />
+                    </button>
+                    <span className={`transition-opacity ${useAgenticRAG ? 'opacity-100 font-semibold' : 'opacity-40'}`}>
+                        🤖 Agentic
+                    </span>
+                </div>
             </div>
 
             {/* Input Island - Fixed at bottom */}
@@ -277,6 +328,54 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                     AI 生成内容可能不完全准确，请核对重要信息。
                 </div>
             </div>
-        </div>
+
+            {/* Source Content Modal */}
+            {
+                activeSource && (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 transition-all animate-in fade-in duration-200">
+                        <div
+                            className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col animate-in zoom-in-[0.98] duration-200 border border-white/20"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <div className="flex items-center justify-between p-4 border-b border-gray-100 bg-gray-50/50 rounded-t-xl">
+                                <div className="flex flex-col gap-0.5 min-w-0">
+                                    <h3 className="font-semibold text-base text-gray-800 truncate flex items-center gap-2">
+                                        <svg className="w-4 h-4 text-[var(--accent-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                        {activeSource.source}
+                                    </h3>
+                                    <div className="text-xs text-gray-500 font-mono flex items-center gap-2">
+                                        <span className="bg-gray-200/60 px-1.5 py-0.5 rounded">Chunk {activeSource.chunk_id}</span>
+                                        {activeSource.section && <span className="text-gray-400">|</span>}
+                                        {activeSource.section && <span>{activeSource.section}</span>}
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setActiveSource(null)}
+                                    className="p-2 hover:bg-gray-200/60 text-gray-400 hover:text-gray-600 rounded-lg transition-colors"
+                                >
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div className="p-6 overflow-y-auto font-mono text-sm leading-relaxed text-gray-700 whitespace-pre-wrap bg-white selection:bg-[var(--accent-primary)]/10 selection:text-[var(--accent-primary)]">
+                                {activeSource.full_content || activeSource.content}
+                            </div>
+                            <div className="p-3 border-t border-gray-100 bg-gray-50/50 rounded-b-xl flex justify-end">
+                                <button
+                                    onClick={() => setActiveSource(null)}
+                                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 hover:bg-gray-200/50 rounded-lg transition-colors"
+                                >
+                                    关闭预览
+                                </button>
+                            </div>
+                        </div>
+                        {/* Backdrop click to close */}
+                        <div className="absolute inset-0 -z-10" onClick={() => setActiveSource(null)}></div>
+                    </div>
+                )
+            }
+        </div >
     );
 }

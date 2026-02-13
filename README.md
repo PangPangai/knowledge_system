@@ -118,17 +118,23 @@ cd backend
 py admin_cli.py --help
 ```
 
-#### 上传单个文档
+#### 上传文档/目录
 
 ```powershell
+# 1. 上传单个文件 (默认开启自动工具发现)
 py admin_cli.py upload path/to/document.pdf
+
+# 2. 递归上传整个目录 (自动跳过已存在的同名文件，实现增量更新)
+py admin_cli.py upload D:\EDA_Docs\Innovus
+
+# 3. 禁用上传后的自动工具发现 (如果你不想更新 tools_config.json)
+py admin_cli.py upload path/to/docs --no-discover
 ```
 
-#### 批量上传文档
+#### 查看后台任务
 
 ```powershell
-# 上传指定目录下的所有 PDF
-py batch_upload.py path/to/pdf_directory
+py admin_cli.py tasks
 ```
 
 #### 列出所有文档
@@ -141,6 +147,31 @@ py admin_cli.py list
 
 ```powershell
 py admin_cli.py delete document.pdf
+```
+
+#### 清空知识库 (危险操作)
+
+```powershell
+# 正常模式: 逐个删除文档 (较慢，需要后端运行中)
+py admin_cli.py clear
+
+# 快速模式: 直接物理删除数据库文件夹 (瞬间完成)
+# ⚠️ 关键: 必须先关闭后端服务窗口！否则会报错 [WinError 32] 文件被占用
+
+# 方式 1: 手动关闭后端终端，然后运行:
+py admin_cli.py clear --fast
+
+# 方式 2 (推荐): 使用强制清理脚本 (会自动关闭后端进程)
+.\force_clean.bat
+
+```
+
+#### 高级工具发现 (Tool Discovery)
+
+```powershell
+# 扫描现有文档文件名，自动更新 tools_config.json 中的工具匹配规则
+# (通常在上传时会自动触发，此命令用于手动强制刷新)
+py admin_cli.py discover-tools
 ```
 
 #### 检查系统状态
@@ -174,8 +205,9 @@ knowledge_system/
 ├── backend/
 │   ├── main.py              # FastAPI 主应用
 │   ├── rag_engine.py        # RAG 核心引擎
-│   ├── admin_cli.py         # 管理员 CLI 工具 ⭐ 新增
-│   ├── batch_upload.py      # 批量上传脚本 ⭐ 新增
+│   ├── task_manager.py      # 异步上传任务管理器
+│   ├── admin_cli.py         # 管理员 CLI 工具 (含批量上传)
+│   ├── tools_config.json    # 可配置化工具规则
 │   ├── requirements.txt     # Python 依赖
 │   └── .env.example         # 环境变量模板
 └── frontend/
@@ -195,9 +227,17 @@ knowledge_system/
 - 查看 `.env` 中的 `API_BASE_URL` 配置
 
 ### 上传文档失败
-- 确认文件是 PDF 格式
-- 检查文件大小 (建议 < 50MB)
-- 查看后端终端日志
+- 确认文件是 PDF 或 Markdown 格式
+- 超大文件 (如 6000 页 PDF) 请使用默认异步模式上传，不要加 `--sync`
+- 上传后可用 `py admin_cli.py tasks` 查看处理进度
+- 查看后端终端日志获取详细错误信息
+
+### 上传中断/失败后的处理
+如果上传过程中意外中断（如进度条走到一半），数据库中可能残留部分"脏数据"。
+**正确做法**：
+1. **清理残余**：执行 `py admin_cli.py delete filename.pdf`（即使之前只传了一半，此命令也能清理干净）
+2. **重新上传**：执行 `py admin_cli.py upload filename.pdf`
+⚠️ 请勿直接重新上传，否则会导致内容重复（旧的残缺数据 + 新的完整数据）。
 
 ### 用户前端无法连接后端
 - 确认后端服务已启动 (http://localhost:8000/health)
@@ -209,9 +249,9 @@ knowledge_system/
 ### 场景 1: 导入技术文档
 
 ```powershell
-# 管理员操作: 批量导入 Innovus User Guide
+# 管理员操作: 批量导入 Innovus User Guide (自动扫描子目录)
 cd backend
-py batch_upload.py D:\EDA_Docs\Innovus
+py admin_cli.py upload D:\EDA_Docs\Innovus
 ```
 
 用户访问前端,提问: "如何在 Innovus 中优化时序?"

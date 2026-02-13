@@ -1,0 +1,32 @@
+{
+    "fusion compiler application options and attributes 24.09.sp3.pdf": {
+        "status": "GARBLED",
+        "reason": "Confirmed Identity-H mapping failure (Garbage detected)",
+        "pages": 6027
+    },
+    "fusion compiler error messages.pdf": {
+        "status": "CLEAN",
+        "reason": "High ASCII density (1.00)",
+        "pages": 9161
+    },
+    "fusion compiler tool commands.pdf": {
+        "status": "CLEAN",
+        "reason": "High ASCII density (1.00)",
+        "pages": 6475
+    },
+    "fusion compiler user guide -24.09.sp3.pdf": {
+        "status": "CLEAN",
+        "reason": "High ASCII density (1.00)",
+        "pages": 1086
+    },
+    "fusion compiler variables and attributes 23.12.pdf": {
+        "status": "CLEAN",
+        "reason": "High ASCII density (1.00)",
+        "pages": 2259
+    },
+    "ptug+.pdf": {
+        "status": "CLEAN",
+        "reason": "High ASCII density (1.00)",
+        "pages": 1348
+    }
+}

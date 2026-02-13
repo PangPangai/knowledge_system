@@ -1,0 +1,66 @@
+{
+    "tools": [
+        {
+            "id": "fc",
+            "name": "Fusion Compiler (FC)",
+            "filename_patterns": [
+                "fc",
+                "fusion"
+            ],
+            "query_keywords": [
+                "fc",
+                "fusion compiler"
+            ]
+        },
+        {
+            "id": "pt",
+            "name": "PrimeTime (PT)",
+            "filename_patterns": [
+                "pt",
+                "primetime"
+            ],
+            "query_keywords": [
+                "pt",
+                "primetime",
+                "prime time"
+            ]
+        },
+        {
+            "id": "icc2",
+            "name": "IC Compiler 2 (ICC2)",
+            "filename_patterns": [
+                "icc2",
+                "ic_compiler",
+                "icc"
+            ],
+            "query_keywords": [
+                "icc2",
+                "ic compiler",
+                "icc"
+            ]
+        },
+        {
+            "id": "dc",
+            "name": "Design Compiler (DC)",
+            "filename_patterns": [
+                "dc",
+                "design_compiler"
+            ],
+            "query_keywords": [
+                "dc",
+                "design compiler"
+            ]
+        },
+        {
+            "id": "starrc",
+            "name": "StarRC",
+            "filename_patterns": [
+                "starrc"
+            ],
+            "query_keywords": [
+                "starrc",
+                "parasitic"
+            ]
+        }
+    ]
+}
