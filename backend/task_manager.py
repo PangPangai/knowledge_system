@@ -6,11 +6,14 @@ Background task lifecycle management for long-running document ingestion.
 """
 
 import asyncio
+import io
+import sys
 import uuid
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Callable, Dict, Optional, Awaitable
+from typing import Callable, Dict, List, Optional, Awaitable
 
 
 class TaskStatus(str, Enum):
@@ -19,6 +22,35 @@ class TaskStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class _TeeWriter:
+    """
+    Stdout tee-writer: writes to both original stdout (server terminal)
+    and a line buffer (for client-side log streaming).
+    Thread-safe line splitting is handled internally.
+    """
+
+    def __init__(self, task: "UploadTask", original_stdout):
+        self._task = task
+        self._original = original_stdout
+        self._buf = ""
+
+    def write(self, text: str):
+        self._original.write(text)  # Always mirror to server terminal
+        self._buf += text
+        # Flush complete lines to task.logs
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line:  # Skip blank lines
+                self._task.logs.append(line)
+
+    def flush(self):
+        self._original.flush()
+        # Flush any remaining partial line
+        if self._buf.strip():
+            self._task.logs.append(self._buf)
+            self._buf = ""
 
 
 @dataclass
@@ -34,6 +66,7 @@ class UploadTask:
     processing_started_at: Optional[str] = None
     processing_duration: Optional[float] = None
     file_path: Optional[str] = None  # Temp file path for cleanup
+    logs: List[str] = field(default_factory=list)  # Captured processing logs
 
     def to_dict(self) -> dict:
         """Serialize task to dict"""
@@ -44,9 +77,9 @@ class UploadTask:
             "chunks_created": self.chunks_created,
             "error": self.error,
             "created_at": self.created_at,
-            "created_at": self.created_at,
             "completed_at": self.completed_at,
             "processing_duration": self.processing_duration,
+            "logs": self.logs,
         }
 
 
@@ -94,20 +127,39 @@ class TaskManager:
         task.status = TaskStatus.PROCESSING
         task.processing_started_at = datetime.now().isoformat()
         start_time = datetime.now()
+
+        print(f"\n{'='*60}")
+        print(f"📥 [Task {task.task_id}] Starting: {task.filename}")
+        print(f"{'='*60}")
+
+        def run_in_thread():
+            """
+            Run ingest_fn in a worker thread, capturing stdout via TeeWriter
+            so logs appear in both server terminal and task.logs for client polling.
+            """
+            original_stdout = sys.stdout
+            tee = _TeeWriter(task, original_stdout)
+            sys.stdout = tee
+            try:
+                return asyncio.run(ingest_fn(task.file_path, task.filename))
+            finally:
+                sys.stdout = original_stdout
+                tee.flush()  # Flush any remaining partial line
+
         try:
-            # Run in thread pool: ingest_fn is async but internally CPU-bound,
-            # calling it directly would block the event loop and prevent
-            # FastAPI from handling other requests (e.g. next file upload).
             loop = asyncio.get_running_loop()
-            chunks = await loop.run_in_executor(
-                None,
-                lambda: asyncio.run(ingest_fn(task.file_path, task.filename)),
-            )
+            chunks = await loop.run_in_executor(None, run_in_thread)
             task.chunks_created = chunks
             task.status = TaskStatus.COMPLETED
+            duration = (datetime.now() - start_time).total_seconds()
+            print(f"\n✅ [Task {task.task_id}] Completed: {task.filename}")
+            print(f"   Chunks: {chunks}  |  Duration: {duration:.1f}s")
         except Exception as e:
             task.status = TaskStatus.FAILED
             task.error = str(e)
+            duration = (datetime.now() - start_time).total_seconds()
+            print(f"\n❌ [Task {task.task_id}] Failed: {task.filename}")
+            print(f"   Error: {e}  |  Duration: {duration:.1f}s")
         finally:
             end_time = datetime.now()
             task.completed_at = end_time.isoformat()
@@ -116,6 +168,7 @@ class TaskManager:
             if task.file_path and os.path.exists(task.file_path):
                 try:
                     os.remove(task.file_path)
+                    print(f"   🗑️  Temp file removed: {task.file_path}")
                 except OSError:
                     pass
 

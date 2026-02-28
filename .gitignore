@@ -31,3 +31,12 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Vector Databases
+backend/test_chroma_db*/
+
+# Test Outputs
+backend/*_output.txt
+backend/*_stderr.txt
+backend/test_out.txt
+backend/*.bak

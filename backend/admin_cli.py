@@ -102,19 +102,42 @@ class KnowledgeBaseAdmin:
     def upload_document(self, file_path: str, poll_interval: int = 3) -> dict:
         """
         Async upload: submit file then poll until processing completes.
-
-        Returns:
-        Returns:
-            dict with filename, chunks_created, and processing_duration
+        Streams task logs to the local terminal incrementally during processing.
         """
         # Step 1: Submit file (timeout covers network transfer only)
         result = self._send_file(file_path, endpoint="/upload", timeout=300)
         task_id = result["task_id"]
 
-        # Step 2: Poll until completed or failed
+        # Step 2: Poll until completed or failed, printing new log lines
+        last_log_count = 0
+        last_was_transient = False
+        transient_icons = ["⏳", "⚙️", "🔢"]
+
         while True:
             status = self.get_task_status(task_id)
             state = status["status"]
+
+            # Print any new log lines since last poll
+            logs = status.get("logs", [])
+            for line in logs[last_log_count:]:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if this line is a "transient" progress update
+                is_transient = any(line.startswith(icon) for icon in transient_icons)
+                
+                if is_transient and last_was_transient:
+                    # Clear last line (Move up 1, Clear line)
+                    # \033[A = move up, \033[K = clear line from cursor to end
+                    print("\033[F\033[K", end="")
+                    print(f"   {line}")
+                else:
+                    print(f"   {line}")
+                
+                last_was_transient = is_transient
+
+            last_log_count = len(logs)
 
             if state == "completed":
                 return {
@@ -125,8 +148,9 @@ class KnowledgeBaseAdmin:
             elif state == "failed":
                 raise Exception(f"Processing failed: {status.get('error', 'unknown')}")
 
-            # Show progress indicator
-            print(f"   ⏳ {state}...", end="\r")
+            if last_log_count == 0:
+                # No logs yet - show pending indicator
+                print(f"   ⏳ {state}...", end="\r")
             time.sleep(poll_interval)
 
     def upload_document_sync(self, file_path: str) -> dict:

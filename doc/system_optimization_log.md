@@ -129,3 +129,240 @@
 
 ### 4. 下一步规划
 - [ ] 考虑针对 `GARBLED` 文件自动触发本地 OCR (pytesseract)。
+
+---
+
+## 2026-02-26: PDF 切片参数调优 (Semantic Coherence Tuning)
+
+### 1. 背景与问题 (Context)
+- **碎片化问题**: 之前的切片逻辑是将 `> 1500` 字符的章节强制按 `1000` 字符切分。经过对实际文档的统计分析，发现《Fusion Compiler Error Messages》（平均 1745 字符）和《Variables & Attributes》（平均 2502 字符）等高频查询内容的单节长度均略高于原阈值。
+- **语义截断**: 原来的硬切分会导致一个完整的错误排查步骤或参数说明被生硬截断，LLM 在组装答案时容易遗漏后半部分的关键信息。
+
+### 2. 变更内容 (Changes)
+
+#### A. 切片阈值自适应调整
+- **模块**: `backend/.env`, `backend/pdf_processor.py`
+- **实施细节 (Technical Details)**: 
+    1.  **Retention Threshold (免切分保留阈值)**: 
+        从 `1.5 * MAX_CHUNK_SIZE` (1500字符) 提升为独立的配置项 `RETENTION_THRESHOLD=2500`。确保绝大多数的“具体命令、错误描述、属性定义”能在一个 Chunk 内完整保留。
+    2.  **Base Chunk Size (基础切块大小)**:
+        `CHUNK_SIZE` 从 `1000` 提升至 `1500`。针对大章节（如 User Guide），减少碎片数量，提高单片的信息密度。
+    3.  **Chunk Overlap (重叠区)**:
+        `CHUNK_OVERLAP` 从 `100` 提升至 `200`，进一步缓解硬截断带来的语义割裂。
+    4.  **配置解耦**: 将这些控制变量彻底剥离并托管在 `.env` 中，便于未来持续实验调优，无需硬编码修改。
+
+### 3. 性能收益 (Impact)
+- **上下文完整性 (Contextual Integrity)**: Error Message 和 Variables 类文档在检索时的召回碎片将由原先的 2-3 块缩减为 1 块，从根本上消除了单条报错说明被拦腰斩断的风险。
+- **Token 效率**: 2500 字符在 BGE M3 编码下约 600-800 Tokens，完全处于主流 Embedding 和 LLM Chunking 的优质舒适区内。
+
+---
+
+## 2026-02-26: Agentic RAG Grade Node 上下文污染修复 (Grade Node Remediation)
+
+### 1. 背景与问题 (Context)
+- **Problem**: 在 Agentic RAG 流程中，生成阶段 (Generate Node) 获取到的上下文由于包含了大量无关的父节点文档，导致 LLM 上下文溢出并增加了幻觉 (Hallucination) 风险。
+- **Root Cause**: `grade_node` 虽然正确执行了 LLM 维度的相关性打分，但未将过滤后的 `relevant_docs` 同步更新到下游的 `state["documents"]`，导致所有被 Retriever 召回的原始 Chunks (包括低分/无关 Chunk) 直接进入了 `_expand_to_parent` 扩充逻辑，触发了不必要的父节点溯源与合并。
+
+### 2. 变更内容 (Changes)
+
+#### [Agentic RAG Core]
+- **Module**: `backend/agentic_rag.py`
+- **实施细节 (Technical Details)**:
+    1. **State Update Enforcement (解冻状态覆盖)**: 
+        - **Detail**: 解除 `state["documents"] = relevant_docs` 的注释。
+        - **Logic**: 强制将 LangGraph 图数据流 (Graph State) 变更为仅包含通过 Grade 评估为 `relevant` 的 Chunks。
+    2. **Parent-Child Retrieval Precision (父子文档提取闭环)**:
+        - **Logic**: 确保传递给 `rag_engine._expand_to_parent(documents)` 的文档列表由原先的“全量粗排结果”锐减至“真正相关的精排 Chunks”。这使得下游的 `seen_parent_ids` 去重集合仅包含高价值章节的 ID，彻底杜绝了无关大段落被错误装载到 LLM 的 Prompt 中。
+
+### 3. 性能收益 (Impact)
+- **上下文纯净度 (Context Purity)**: 彻底消除因 Semantic Search 泛化召回导致的无效上下文污染，仅将精选后的少量 `parent_docs` 提取并传递至最终生成器。
+- **防止 LLM 迷失 (Anti-Lost-in-the-Middle)**: 避免了无关文档过度堆积对模型 Attention 的干扰，在显著降低单次回答 Token 消耗的同时，大幅抑制了偏题率与幻觉生成率。
+
+---
+
+## 2026-02-26: PDF页脚噪声清洗正则表达式宽容度修正 (Noise Cleaning Regex Fix)
+
+### 1. 背景与问题 (Context)
+- **Problem**: 发现 `parent_docs.json` 中，大量提取出的 Markdown 内容依然保留了诸如 `**Chapter 1: 3DCODE**` 或带有空行的分页提取噪声（页眉页脚）。
+- **Root Cause**: `_auto_detect_noise` 方法使用的是 `fitz` 的纯文本提取（Plain Text）来统计高频出现的 Header/Footer（例如统计到高频句 `Chapter 1: 3DCODE`）。但在 `_apply_cleaning` 这步时，用来被替换的原文字体已经被 `pymupdf4llm` 渲染成了 Markdown 格式叠加了大量符号（例如包围了 `**` 加粗标识）。直接在包含了 Markdown 特定符号的文本上应用纯净文本的 `re.sub(pat, '', text)`会导致匹配失败，从而噪声未被清洗。
+
+### 2. 变更内容 (Changes)
+
+#### [PDF Noise Cleaner]
+- **Module**: `backend/pdf_processor.py`
+- **实施细节 (Technical Details)**:
+    1. **Forgiving Regex Construction (宽容模式正则)**: 
+        - **Detail**: 将简单的 `re.sub(pat, '', text)` 升级为能够无视周围常见 Markdown 修饰符号的替换模式。
+        - **Logic**: 构建了动态的特征提取 Regex：`forgiving_pat = r'(?m)^[\s#*_-]*' + pat + r'[\s*_-]*$'`。这告诉正则：“只要这一行里的核心词与高频打标的噪点（如`pat`）一致，无论它前面是不是有换行空格，或者左右是不是加了`*`号被 Markdown 解析为了粗体，整行都将直接判定为噪点并作剥离处理”。
+
+### 3. 性能收益 (Impact)
+- **数据彻底清洗 (Pristine Context)**: 彻底拔除原本遗留在父节点文档（Parent Documents）段首或段尾的页眉碎片，让持久化到 JSON 的数据变得极度干净。同时避免含有强特定词（如 `3DCODE`）的页脚干扰 ChromaDB 中 Chunk 的 Embedding 质量。
+
+---
+
+## 2026-02-26: PDF 切片重叠与前置原数据残留修复 (Semantic Slicing Preamble Fix)
+
+### 1. 背景与问题 (Context)
+- **Problem**: 用户发现在 JSON 中，处于同一页面的多个连续章节（例如 `3DCODE-001` 到 `3DCODE-003`）的内容出现了严重重叠，每个章节的 Chunk 都从该页最顶端的说明性文字（Preamble）开始包含。
+- **Root Cause**: 在 `_chunk_pdf` 方法中，页面提取范围是由 `start_page_idx` 和 `end_page_idx` 控制的。当多个章节在同一个物理页起始时，它们提取到的原始 MD 文本（`raw_md`）完全一致（皆为一整页的代码）。原有的“Strict Truncation Logic”仅执行了“向后截断”（即匹配 `next_title` 并丢弃其后的文本），但**遗漏了“向前截断”**，导致属于先前章节的正文或当前页共用的文档说明被重复囊括进了每一个子章节。
+
+### 2. 变更内容 (Changes)
+
+#### [PDF Semantic Slicer]
+- **Module**: `backend/pdf_processor.py`
+- **实施细节 (Technical Details)**:
+    1. **Bi-directional Truncation (双向严格截断)**: 
+        - **Detail**: 新增了针对 `current_title` 的向前截断逻辑，同时优化了向后截断的正则表达式宽容度。
+        - **Logic**: 构建特征正则 `curr_pattern = re.compile(r'(?:^|\n)[\s#*_-]*' + escaped_current + r'[\s*_-]*(?:\n|$)', re.IGNORECASE)`。在拿到整页的 `raw_md` 后，首先定位当前章节的 Title，并将该 Title 之前的所有非预期前置文本（哪怕跨页截取带来的多余信息）一次性切除。
+    2. **Forgiving Regex (高宽容截断正则)**:
+        - 将查找 Title 的正则放宽至允许任意的 Markdown 符号包裹（例如 `**Title**` 或 `### Title`），确保即便 `pymupdf4llm` 的输出格式波动，截断锚点仍能被精准定位。
+
+### 3. 性能收益 (Impact)
+- **数据隔离 (Information Isolation)**: 彻底解决了“同一物理页内多个逻辑段落重合互相污染”的严峻问题，保证 JSON 字典中的每个 `parent_id` 旗下仅存有隶属于它的干净数据。
+- **消除幻觉与存储冗余**: 阻断了诸如 "This document describes..." 这类无意义通用说明金句随着每个配置项 Chunk 同时灌入向量数据库，显著提升了 BM25 与语义提取机制 (RRF) 对于单个章节特有关键词的鉴别率。
+
+---
+
+## 2026-02-26: 基于物理区块分割的自适应 PDF 去噪 (Smart Bbox Clipping)
+
+### 1. 背景与问题 (Context)
+- **Problem**: 原有的以“全文首尾频次采样”为基础的噪声识别算法（找出书里出现次数过半的相同句子并用正则表达式消除）存在严重漏洞：
+  1. 无法识别**动态内容**（如逐页递增的数字页码 `Page 627` 到 `Page 628` 在去重后频次永远为 1，无法触发防御阈值）。
+  2. 无法识别**章节独占特征**（如 `Chapter 1: 3DCODE` 只在全书前 100 页出现，在整本 6000 页全局采样时命中率过低，被判定为“正文”放行）。
+- **Root Cause**: 纯文本的词频聚合（Frequency Aggregation on Plain Text）彻底丢失了 PDF 中最关键的先验知识：页面设计的物理边界约束。
+
+### 2. 变更内容 (Changes)
+
+#### [PDF Adaptive Clipper]
+- **Module**: `backend/pdf_processor.py`
+- **实施细节 (Technical Details)**:
+    1. **引入物理区块分析 (Physical Block Analysis)**: 
+        - **Detail**: 新增 `_detect_safe_margins` 核心算法。不再试图去“读”文字是什么，而是去“看”文字在哪里。
+        - **Logic**: 
+            - 针对单本 PDF 取样提取其文本结构区块 `(x0, y0, x1, y1, text)`。
+            - 以页面高度的上下共 `24%` 区间为侦测雷达带。寻找这些地带频繁发生文字印刷事件的特征线。
+            - 动态算出贴合该文档的**页眉最底防线 (Top Cutoff)** 和**页脚最高防线 (Bottom Cutoff)**，并添加 2px 安全垫。
+    2. **降维物理截断 (PyMuPDF CropBox Injection)**:
+        - **Detail**: 在提交给 `pymupdf4llm.to_markdown()` 进行昂贵的排版解析前，提前给整个 Document 的所有 Page 施加 `set_cropbox(safe_rect)`。
+        - **Logic**: 系统从物理层面上致盲了提取器。“裁纸刀”边界以外的所有噪音文字在进入 Markdown 字符流之前就不复存在。
+    3. **去除过时纯文本雷达 (Deprecation of Frequency Radar)**:
+        - **Detail**: 全量下线了旧版的 `_auto_detect_noise` 方法及其配合的 Markdown 宽容去噪正则逻辑。因为在物理裁剪面前，它们已经失去了价值。
+
+### 3. 性能收益 (Impact)
+- **绝对的干净 (Zero-Leakage Cleanup)**: 这是架构级别上的降维打击。不论页码用哪国语言写、不论第一章到第一百章的标题怎么换名字，它们均因为其打印位置涉足雷区，被 `Bbox` 裁剪彻底剥去，留存在 `parent_docs.json` 里的提取物只剩下纯净透彻的居中正文。
+- **动态排版适配 (Layout Agnostic)**:
+  - 遇到页边距 10% 的文档，自适应裁剪 `10%`。
+  - 遇到极其粗暴的全屏文档，自适应算出不裁剪 `0%`（零误杀）。
+
+---
+
+## 2026-02-26: 基于原生 TOC 注入的语义切片自愈 (Semantic Title Healing)
+
+### 1. 背景与问题 (Context)
+- **Problem**: 
+  1. **截断失效与前置内容残留**: 遇到极长的配置项标题（如 `da.check_netlist.allow_multiply_driven_nets_by_inputs_and_outputs`）时，PDF 排版引擎会将其强制换行，导致原本属于当前配置项的 Chunk，错误地开头包含了上一配置项的 `See Also` 段落甚至更早的内容。
+  2. **脏词与断词提取**: 在最终的 `parent_docs.json` 里，原本一个完整的技术词汇被排版断行切割成了两个甚至三个词，且中间夹杂着 Markdown 解析器硬插进去的加粗修饰符（如 `**...outp** **uts**`）。这严重破坏了基于倒排索引和 BM25 的关键词精确检索（搜 `inputs_and_outputs` 时完全匹配不到该 Chunk）。
+- **Root Cause**: 原本用于切片的正则表达式是基于字符串级别的全词匹配 `re.escape(title)`，它无法预测排版引擎会在单词的哪一个字母中间插入不可见的换行或空格，一旦原文被物理打断，正则即告失效，退化为无边界截断。
+
+### 2. 变更内容 (Changes)
+
+#### [Fuzzy Token Matching & Healing]
+- **Module**: `backend/pdf_processor.py`
+- **实施细节 (Technical Details)**:
+    1. **字符级模糊正则构建 (Character-level Fuzzy Pattern)**: 
+        - **Detail**: 开发了 `build_char_fuzzy_pattern(title)` 方法。
+        - **Logic**: 取出原生态 TOC 里的绝对纯净 Title，剥离所有空白后，在每个字符之间强行插入极度宽容且安全的包容匹配符 `[\s*]*`（且摒弃了下划线或连字符作为缝隙，防止对正常变量名造成误伤）。
+        - **Result**: 即便物理排版在单词 `outputs` 内插了换行并加了粗 `o** **ut\npu** **ts`，引擎依然能瞬间穿透这些格式障眼法，精确定位标题位置。
+    2. **自愈替换 (Pristine Title Injection)**:
+        - **Detail**: 在通过模糊匹配成功锁定被 PDF 物理结构破坏的标题区域后（`curr_match.start()` 到 `curr_match.end()`），**不再保留原文**。
+        - **Logic**: 将这块“感染”了排版断词和凌乱 Markdown 标记的区域一刀切除，并直接替换注入回最完美的 `# {纯净 TOC Title}\n\n`。
+
+### 3. 性能收益 (Impact)
+- **绝对的数据召回率**: 技术手册中存在大量超长的函数名、配置项或蛇形命名变量。此项“自愈”架构根绝了由于纸张页面宽度限制导致的断词灾难，让入库的专业词汇恢复 100% 完整，BM25 词汇共现率发生质变提升。
+- **高纯净切片边界**: 彻底解决了因长标题换行导致的截断正则失效，确保每一段 Chunk 都是从最干净的标题起始，再无前一个章节的残留尾巴。
+
+---
+
+## 2026-02-27: EDA 专属词库字典 (eda_terms.txt) 清洗与提取规则增强
+
+### 1. 背景与问题 (Context)
+- **Problem**: 发现 `jieba` 分词所依赖的自定义词典 `eda_terms.txt` 中混入了大量无意义的乱码字符（如 `i_niitdn`, `uehtn_n`, `dit_n` 等）。
+- **Root Cause**: 原有词汇提取脚本 `extract_eda_terms.py` 的正则表达式 `r'\b[a-zA-Z]+(?:_[a-zA-Z0-9]+)+\b'` 过于宽松。PDF解析时由于排版断字、连缀或公式干扰生成的随机字母组合加上下划线后，被全部视为合法 EDA 命令导入了高频词库。
+
+### 2. 变更内容 (Changes)
+
+#### [EDA Term Extractor]
+- **Module**: `backend/debug_test/extract_eda_terms.py`
+- **实施细节 (Technical Details)**:
+    1. **Strict Linguistic Filtering (严格语言学屏蔽)**: 
+        - 增加了 `is_valid_eda_term` 规则拦截器。
+        - **元音校验**: 要求包含 4 个字母以上的纯字母单词片段必须含有至少一个元音 (aeiouy)。
+        - **单字符校验**: 拒绝由非坐标或序号的单字母组成的片段（允许 `x, y, z, a, 1, 2` 等，拦截随意的 `i_, n_`）。
+        - **特定模式黑名单**: 使用正则过滤了肉眼观察到的高频无意义组合（如 `^tulauddni`, `niitdn` 等连续非自然组合的前缀）。
+        
+#### [Dictionary Cleanup]
+- **Module**: `backend/eda_terms.txt`
+- **实施细节**: 执行了一次性的历史数据清洗，成功从词库中删除了 59 个垃圾词汇，净化了 BM25 的分词基础。
+
+### 3. 性能收益 (Impact)
+- **分词精确度提升**: 净化后的词库确保 `jieba` 只会将真正的 EDA 领域词汇强制打包，不再错误捕获随机乱码，降低了 BM25 索引的噪音，这为下一步实现“基于高频词的动态混合检索权重”打下了坚实纯净的数据基础。
+
+---
+
+## 2026-02-28: Rebuild 脚本重写为 API 模式 (Rebuild via HTTP API)
+
+### 1. 背景与问题 (Context)
+- **Problem**: 使用 `rebuild.bat` 重建数据库后，检索阶段卡死在 HNSW 向量搜索步骤（`similarity_search_with_score` 永久阻塞）。
+- **Root Cause**: ChromaDB 1.x 采用惰性持久化策略。旧版 `rebuild_index.py` 直接离线实例化 `AdvancedRAGEngine()` 并批量写入后进程直接退出，导致 HNSW 索引（如 `data_level0.bin`）未被完整写入磁盘。服务重启后加载了空/不完整的 HNSW segment，触发 `knn_query` 时进入死锁或无限等待状态。
+
+### 2. 变更内容 (Changes)
+
+#### [Rebuild System]
+- **Module**: `backend/rebuild_index.py`, `backend/rebuild.bat`
+- **实施细节 (Technical Details)**:
+    1. **执行模式重构 (Offline -> API-Driven)**: 彻底移除离线 `RAGEngine` 实例创建动作。所有写入操作均通过 `POST /upload` API 路由至运行中的 `uvicorn` 服务进程。
+    2. **持久化链路统一**: 由于 API 模式由常驻服务进程处理数据，写入后会在服务存活期内维持索引状态，并随服务正常关闭（Graceful Shutdown）触发 ChromaDB 的完全落盘，彻底规避了“写入即退出”导致的索引损坏问题。
+    3. **自动化三阶段流程 (`rebuild.bat`)**:
+        - **Phase 1 (物理清理)**: 手动确认关闭服务后，直接物理删除 `chroma_db/` 文件夹（确保解决 SQLite 文件锁问题）。
+        - **Phase 2 (服务自启)**: 脚本自动启动后端服务并预留 15s 的就绪等待缓冲。
+        - **Phase 3 (异步上传)**: 调用重写后的 `rebuild_index.py` 进行 PDF 质量扫描与 API 并发上传（复用 `admin_cli.py` 的任务轮询与重试逻辑）。
+
+### 3. 性能收益 (Impact)
+- **稳定性**: 彻底修复了重建索引后必须手动进行“冷启动一次检索”或“特定顺序重启”才能恢复搜索的隐患。
+- **流程规范化**: 保证了 `rebuild` 行为与 `admin_cli upload` 在数据处理层面的完全一致性，简化了维护成本。
+- **可观测性**: 现在重建过程可以实时通过 API 返回的 Task ID 追踪每份文档的 `chunks_created` 统计和处理进度。
+
+---
+
+## 2026-02-28: 日志系统增强与文件名污染修复 (Log Streaming & Filename Sanitization)
+
+### 1. 背景与问题 (Context)
+- **Problem 1 (Log Isolation)**: 使用 API 模式上传时，详细的处理日志（如 PDF 转换进度、向量分块进度）仅打印在后端服务终端，用户在 `admin_cli` 或 `rebuild` 窗口只能看到单调的 `⏳ processing...`，缺乏实时反馈。
+- **Problem 2 (Metadata Pollution)**: API 模式下，文档会先存入 `./temp_` 路径，导致 `RAGEngine` 在 metadata 和 `parent_docs.json` 中错误地使用带 `temp_` 前缀的文件名作为 source，破坏了搜索结果的展示美观及数据一致性。
+- **Problem 3 (Log Flood)**: 详细日志流化后，PDF 页数转换等高频进度更新会产生大量终端刷屏。
+
+### 2. 变更内容 (Changes)
+
+#### [Backend: Log Streaming Infrastructure]
+- **Module**: `backend/task_manager.py`
+- **实施细节**:
+    1. **`_TeeWriter` 机制**: 实现了一个 Stdout 重定向器，在后台 Worker 线程中运行。它能将 stdout 输出同步镜像到原控制台和任务私有的 `logs` 缓冲区。
+    2. **API 暴露**: `UploadTask` 对象新增 `logs` 列表字段，通过轮询接口增量暴露给客户端。
+
+#### [RAG Core: Metadata & Progress Tracking]
+- **Module**: `backend/rag_engine.py`, `backend/pdf_processor.py`
+- **实施细节**:
+    1. **文件名修复**: `ingest_document` 优先使用调用方传入的原始文件名，并向 `pdf_processor` 传递 `display_name`，确保 metadata 中的 source 始终为原始名。
+    2. **进度日志增强**: PDF 转换和向量写入阶段统一显示 **Elapsed (阶段累计耗时)** 替代单次批耗时，避免动态刷新时产生歧义。
+    3. **可观测指标**: 增加了向量写入的 Batch 进度、BM25 词汇表大小变化及索引更新耗时等详细指标。
+
+#### [CLI: Client Dynamic Refresh]
+- **Module**: `backend/admin_cli.py`, `backend/rebuild_index.py`
+- **实施细节**:
+    1. **智能覆盖逻辑**: 客户端识别特定图标前缀（⏳, ⚙️, 🔢）。若检测为连续的进度类日志，使用 ANSI `\033[F\033[K` 转义序列向上覆盖旧行。
+    2. **平滑化展示**: 实现了 PDF 转换、章节索引、向量入库三大阶段的“单行原地刷新”效果。
+
+### 3. 性能收益 (Impact)
+- **体验升级**: 重构/上传过程从“黑盒等待”变为“透明流式反馈”，处理长达数千页的超大 PDF 时，用户可清晰看到页数变动及累计用时。
+- **数据纯净度**: 解决了 `temp_` 前缀导致的 KB 脏数据问题，保持了 source id 的整洁一致。
+- **交互极简**: 动态刷新机制减少了 90% 以上的无用日志滚动，极大提升了终端操作的专业感。

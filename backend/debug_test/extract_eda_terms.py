@@ -54,22 +54,98 @@ def scan_documents(data_dir):
                 
     return all_text, files
 
+def is_valid_eda_term(term):
+    """Filter out garbage terms generated from PDF parsing."""
+    if len(term) < MIN_LENGTH:
+        return False
+        
+    parts = term.split('_')
+    
+    # Rule 1: No excessive underscores
+    if len(parts) > 6:
+        return False
+        
+    # Rule 2: Single-letter restrictions
+    allowed_single = {'x', 'y', 'z', 'a', 'b', 'c', 'd', '1', '2', '3', '4', '7'}
+    for part in parts:
+        if len(part) == 1 and part not in allowed_single:
+            return False
+            
+    # Rule 3: Vowel check for longer parts
+    vowels = set('aeiouy')
+    for part in parts:
+        if part.isalpha() and len(part) >= 4:
+            if not any(char in vowels for char in part):
+                return False
+                
+    # Rule 4: Suspicious consecutive characters
+    for part in parts:
+        if part.startswith('ii') or part.startswith('uu'):
+            return False
+            
+    # Rule 5: Pure gibberish patterns manually observed
+    gibberish_patterns = [
+        r'^tulauddni', r'niitdn', r'^inmi', r'^inuni', r'^eiouni', r'^nxea', r'^todt', r'^ualf', 
+        r'^whnon', r'^inmia', r'^inuia'
+    ]
+    for p in gibberish_patterns:
+        if re.search(p, term):
+            return False
+            
+    return True
+
 def extract_candidates(text):
     """Extract potential EDA terms using regex"""
     # Pattern 1: snake_case words (most EDA commands)
-    # e.g. set_placement_status, check_design
     snake_case_pattern = r'\b[a-zA-Z]+(?:_[a-zA-Z0-9]+)+\b'
-    
-    # Pattern 2: CamelCase or specific acronyms (optional, but snake_case is key for EDA)
-    # e.g. FusionCompiler, PrimeTime (often appearing as normal words, harder to filter)
     
     # Find all matches
     matches = re.findall(snake_case_pattern, text)
     
-    # Filter by length
-    candidates = [m.lower() for m in matches if len(m) >= MIN_LENGTH]
-    
+    candidates = []
+    for m in matches:
+        term = m.lower()
+        if is_valid_eda_term(term):
+            candidates.append(term)
+            
     return candidates
+
+def cleanup_existing_dict():
+    """Clean up the existing eda_terms.txt file using the new validation rules."""
+    dict_path = os.path.join(os.path.dirname(__file__), "..", "eda_terms.txt")
+    if not os.path.exists(dict_path):
+        print(f"⚠️ Existing dictionary not found at {dict_path}")
+        return
+
+    print(f"🧹 Cleaning up existing dictionary at {dict_path}...")
+    
+    with open(dict_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+        
+    valid_lines = []
+    removed_count = 0
+    
+    for line in lines:
+        if line.startswith('#'):
+            valid_lines.append(line)
+            continue
+            
+        parts = line.strip().split()
+        if not parts:
+            continue
+            
+        term = parts[0]
+        if is_valid_eda_term(term):
+            valid_lines.append(line)
+        else:
+            removed_count += 1
+            
+    if removed_count > 0:
+        with open(dict_path, 'w', encoding='utf-8') as f:
+            f.writelines(valid_lines)
+        print(f"   ✅ Cleaned up {removed_count} garbage terms from existing dictionary.")
+    else:
+        print("   ✅ Existing dictionary is already clean.")
 
 def main():
     print(f"📂 Scanning documents in {DATA_DIR}...")
@@ -102,6 +178,9 @@ def main():
             
     print(f"💾 Candidates saved to {OUTPUT_FILE}")
     print("👉 improved: You can verify this list and append content to 'eda_terms.txt'.")
+    
+    # Also clean the existing dictionary
+    cleanup_existing_dict()
 
 if __name__ == "__main__":
     main()

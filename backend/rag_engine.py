@@ -708,17 +708,26 @@ class AdvancedRAGEngine:
         """
         Ingest a document into the knowledge base with semantic chunking
         """
-        filename = os.path.basename(file_path) # Ensure filename is just basename
+        # Fix: use the caller-provided filename (original name without temp_ prefix).
+        # Only fall back to basename if filename is empty/missing.
+        if not filename:
+            filename = os.path.basename(file_path)
+
         print(f"📥 Ingesting: {filename}")
-        
+
         documents = []
         file_ext = Path(file_path).suffix.lower()
-        
+
         if file_ext == '.pdf':
             # New Strategy: Modular PDF Processor
             # Returns: List[Document], Dict[parent_id, text]
-            documents, parent_map = self.pdf_processor.process_pdf(file_path)
-            
+            documents, parent_map = self.pdf_processor.process_pdf(file_path, display_name=filename)
+
+            # Fix source metadata: replace temp filename with original filename
+            for doc in documents:
+                if doc.metadata.get("source", "") != filename:
+                    doc.metadata["source"] = filename
+
             # Merge into memory and prep for persistence
             if filename not in self.parent_docs:
                 self.parent_docs[filename] = {}
@@ -728,14 +737,14 @@ class AdvancedRAGEngine:
             # Fallback for MD/TXT (Old Logic)
             if filename not in self.parent_docs:
                  self.parent_docs[filename] = {}
-                 
+
             full_text = self._extract_markdown_text(file_path)
             # Store full text
             self.parent_docs[filename]["full_text"] = full_text
-            
+
             # Chunk (returns List[Dict])
             chunk_dicts = self._chunk_markdown(full_text, filename)
-            
+
             # Convert to Documents
             for idx, chunk in enumerate(chunk_dicts):
                 doc = Document(
@@ -753,25 +762,43 @@ class AdvancedRAGEngine:
                 documents.append(doc)
         else:
             raise ValueError(f"Unsupported file type: {file_ext}")
-        
+
         if not documents:
             print(f"   ⚠️ No chunks created for {filename}")
             return 0
-            
+
+        print(f"   📊 Total chunks to index: {len(documents)}")
+
         # Add to vector store in batches
+        import time
         BATCH_SIZE = 4000
+        total_batches = (len(documents) - 1) // BATCH_SIZE + 1
+        t_vec_start = time.time()
         for i in range(0, len(documents), BATCH_SIZE):
             batch = documents[i:i + BATCH_SIZE]
+            batch_num = i // BATCH_SIZE + 1
             self.vectorstore.add_documents(batch)
-            print(f"   Added batch {i//BATCH_SIZE + 1}/{(len(documents)-1)//BATCH_SIZE + 1} to vector store")
-        
+            elapsed_total = time.time() - t_vec_start
+            print(f"   🔢 Vector indexing: {min(i + BATCH_SIZE, len(documents))}/{len(documents)} chunks "
+                  f"(Batch {batch_num}/{total_batches}, Elapsed: {elapsed_total:.1f}s)")
+        vec_total = time.time() - t_vec_start
+        print(f"   ✅ Vector store done: {len(documents)} chunks in {vec_total:.1f}s")
+
         # Add to BM25 index
+        bm25_count_before = len(self.bm25_index.documents)
+        t_bm25 = time.time()
         self.bm25_index.add_documents(documents)
-        
+        bm25_elapsed = time.time() - t_bm25
+        vocab_size = len(self.bm25_index.bm25.idf) if self.bm25_index.bm25 else 0
+        print(f"   📝 BM25 updated: {bm25_count_before} → {len(self.bm25_index.documents)} docs  "
+              f"|  vocab={vocab_size}  |  {bm25_elapsed:.1f}s")
+
         # Persist parent docs
         self._save_parent_docs()
-        
+        print(f"   💾 parent_docs.json saved  ({len(self.parent_docs.get(filename, {}))} sections for {filename})")
+
         return len(documents)
+
     
     def _extract_pdf_text(self, file_path: str) -> str:
         """Extract text from PDF with page markers"""

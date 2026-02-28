@@ -14,66 +14,72 @@ class PDFProcessor:
             "default": [r"\[Feedback\]\(mailto:[^)]+\)"]
         }
 
-    def process_pdf(self, pdf_path: str) -> Tuple[List[Document], Dict[str, str]]:
+    def process_pdf(self, pdf_path: str, display_name: str = "") -> Tuple[List[Document], Dict[str, str]]:
         """
         Process PDF using TOC-based slicing with strict boundary enforcement.
-        
+
         Args:
-            pdf_path: Absolute path to the PDF file
-            
-        Returns:
-            Tuple containing:
-            - List[Document]: Child chunks for vector indexing
-            - Dict[str, str]: Parent map {parent_id: full_section_text} for persistence
+            pdf_path: Absolute path to the PDF file (may be a temp path)
+            display_name: Original filename to use in metadata/context instead of the temp path basename
         """
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
-            
+
         doc = fitz.open(pdf_path)
         toc = doc.get_toc()  # [[lvl, title, page_num], ...]
-        filename = os.path.basename(pdf_path)
+        # Use display_name if provided to avoid exposing temp_ prefix in metadata
+        filename = display_name if display_name else os.path.basename(pdf_path)
+        print(f"   📄 PDF: {filename}  |  TOC sections: {len(toc)}  |  Pages: {len(doc)}")
         
-        # Auto-detect noise patterns (header/footer)
-        noise_patterns = self._auto_detect_noise(doc)
-        print(f"   🔍 Auto-detected {len(noise_patterns)} noise patterns for {filename}")
+        # 🟢 SMART BBOX DETECTION
+        # Automatically detect header/footer boundaries
+        top_margin, bottom_margin = self._detect_safe_margins(doc)
+        print(f"   📐 Adaptive Margins Calculated: Top={top_margin:.1f}, Bottom={bottom_margin:.1f}")
         
+        # Apply physical clipping to all pages BEFORE conversion
+        page_rect = doc[0].rect
+        safe_rect = fitz.Rect(page_rect.x0, top_margin, page_rect.x1, bottom_margin)
+        for page in doc:
+            page.set_cropbox(safe_rect)
+        print(f"   ✂️  Cropbox applied to {len(doc)} pages  (Top={top_margin:.1f}, Bottom={bottom_margin:.1f})")
+
+
         # ---------------------------------------------------------
         # BATCH CONVERSION OPTIMIZATION
         # ---------------------------------------------------------
-        # Instead of calling to_markdown() for every section (which is slow),
-        # we convert in chunks of 500 pages to show progress.
         total_pages = len(doc)
-        print(f"   🚀 Starting batch Markdown conversion for {total_pages} pages...")
+        print(f"   🚀 Starting batch Markdown conversion (Clipped) for {total_pages} pages...")
         print(f"   ℹ️  This may take 2-5 minutes for large docs. Converting in chunks...")
         
         import time
         t_start = time.time()
-        
+
         all_pages_md = []
-        batch_size = 200 # Process 200 pages at a time for feedback
-        
+        batch_size = 200  # Process 200 pages at a time for feedback
+
         try:
             for start_idx in range(0, total_pages, batch_size):
                 end_idx = min(start_idx + batch_size, total_pages)
                 current_batch_pages = list(range(start_idx, end_idx))
-                
-                print(f"      ⏳ Converting pages {start_idx}-{end_idx} / {total_pages}...", end="\r")
-                
+
+                t_batch = time.time()
                 # Convert this batch
                 batch_data = pymupdf4llm.to_markdown(doc, pages=current_batch_pages, page_chunks=True, write_images=False)
-                
+
                 # Append text to master list
                 if batch_data:
                     all_pages_md.extend([urllib.parse.unquote(p["text"]) for p in batch_data])
                 else:
                     # Handle empty/error pages gracefully
                     all_pages_md.extend([""] * len(current_batch_pages))
-            
-            print() # Newline after progress bar
+
+                elapsed_total = time.time() - t_start
+                print(f"   ⏳ Pages {end_idx}/{total_pages} converted  (Elapsed: {elapsed_total:.1f}s)")
+
             t_end = time.time()
             print(f"   ✅ Batch conversion complete in {t_end - t_start:.2f}s (Avg {(t_end - t_start)/total_pages:.2f}s/page)")
             
-            # --- DEBUG: Dump latest converted markdown ---
+            # Dump latest converted markdown for debugging
             try:
                 debug_md_path = "latest_converted.md"
                 with open(debug_md_path, "w", encoding="utf-8") as f:
@@ -81,7 +87,6 @@ class PDFProcessor:
                 print(f"   📝 Debug: Full markdown dumped to '{debug_md_path}'")
             except Exception as e:
                 print(f"   ⚠️ Failed to dump debug markdown: {e}")
-            # ---------------------------------------------
             
         except Exception as e:
             print(f"\n   ❌ Batch conversion failed at index {len(all_pages_md)}: {e}. Falling back to per-section extraction.")
@@ -123,10 +128,10 @@ class PDFProcessor:
             if start_page_idx > end_page_idx:
                 continue
                 
-            # Extract raw markdown for this section range
-            # page_indices = list(range(start_page_idx, end_page_idx + 1))
-            # print(f"      [DEBUG] Processing Section '{title}' (Pages {start_page_idx}-{end_page_idx}, Total: {len(page_indices)})")
-            
+            # Section progress: print every 50 sections to avoid log flood
+            if i % 50 == 0 or i == len(toc) - 1:
+                print(f"   ⚙️  Section [{i+1}/{len(toc)}] {title[:60]}  (p.{page})")
+
             try:
                 # OPTIMIZED: Get from cache if available
                 if all_pages_md:
@@ -148,39 +153,46 @@ class PDFProcessor:
                 print(f"   ⚠️ Error converting pages {start_page_idx}-{end_page_idx}: {e}")
                 continue
             
-            # ---------------------------------------------------------
-            # STRICT TRUNCATION LOGIC
-            # ---------------------------------------------------------
+            def build_char_fuzzy_pattern(t: str) -> str:
+                clean_t = re.sub(r'\s+', '', t)
+                pattern_parts = []
+                # Only allow whitespace and markdown bold/italic markers as padding between characters
+                separator = r'[\s*]*'
+                for c in clean_t:
+                    if c.isalnum():
+                        pattern_parts.append(re.escape(c))
+                    else:
+                        pattern_parts.append(r'(?:' + re.escape(c) + r')?')
+                return separator.join(pattern_parts)
+
+            # 1. Truncate BEFORE current title (to remove preamble or previous sections on the same page)
+            fuzzy_curr = build_char_fuzzy_pattern(title)
+            # Forgiving pattern matching the start near a line break
+            curr_pattern = re.compile(r'(?:^|\n)[\s#*_-]*(' + fuzzy_curr + r')[\s*_-]*(?:\n|$)', re.IGNORECASE)
+            curr_match = curr_pattern.search(raw_md)
+            if curr_match:
+                # Truncate everything before this header, and HEAL the broken title using the pristine TOC title
+                raw_md = f"# {title}\n\n" + raw_md[curr_match.end():].strip()
+
+            # 2. Truncate AFTER next title (to remove next sections on the same page)
             if i + 1 < len(toc):
                 next_title = toc[i+1][1]
-                # Robustly find the next title in MD format
-                # We look for: \n + (#+) + space + title + space* + \n
+                fuzzy_next = build_char_fuzzy_pattern(next_title)
+                # Forgiving pattern matching the start of the next title
+                next_pattern = re.compile(r'\n[\s#*_-]*(' + fuzzy_next + r')[\s*_-]*(?:\n|$)', re.IGNORECASE)
                 
-                # Escape title for regex, but allow whitespace diffs
-                # Replace space with \s+ to be flexible
-                escaped_title = re.escape(next_title).replace(r'\ ', r'\s+')
-                
-                # Pattern: 
-                # \n        : Start of line (implied)
-                # #{1,6}    : Markdown header markers
-                # \s+       : Space
-                # next_title: The title text
-                # \s*       : Optional trailing space
-                # (?:\n|$)  : End of line or string
-                pattern = re.compile(r'\n#{1,6}\s+' + escaped_title + r'\s*(?:\n|$)', re.IGNORECASE)
-                
-                match = pattern.search(raw_md)
-                if match:
+                next_match = next_pattern.search(raw_md)
+                if next_match:
                     # Found the next header! Truncate everything from match start.
-                    truncate_pos = match.start()
+                    truncate_pos = next_match.start()
                     raw_md = raw_md[:truncate_pos].strip()
-                else:
-                    pass 
             
             # ---------------------------------------------------------
             # NOISE CLEANING
             # ---------------------------------------------------------
-            cleaned_text = self._apply_cleaning(raw_md, noise_patterns)
+            # Bbox clipping already handled headers/footers.
+            # We only apply very specific hardcoded rules here if needed.
+            cleaned_text = self._apply_cleaning(raw_md)
             
             if not cleaned_text.strip():
                 continue
@@ -198,10 +210,12 @@ class PDFProcessor:
             # ---------------------------------------------------------
             # CHUNKING (Child Chunks)
             # ---------------------------------------------------------
-            MAX_CHUNK_SIZE = 1000
+            MAX_CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 1500))
+            CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 200))
+            RETENTION_THRESHOLD = int(os.getenv("RETENTION_THRESHOLD", 2500))
             
-            if len(cleaned_text) <= MAX_CHUNK_SIZE * 1.5:
-                # Small enough to be one chunk
+            if len(cleaned_text) <= RETENTION_THRESHOLD:
+                # Small enough to be one chunk (e.g., Error Messages, Attributes)
                 chunk_docs = [Document(
                     page_content=f"{context_path}\n\n{cleaned_text}",
                     metadata={
@@ -217,7 +231,7 @@ class PDFProcessor:
                 # Use RecursiveCharacterTextSplitter for robust breaking
                 text_splitter = RecursiveCharacterTextSplitter(
                     chunk_size=MAX_CHUNK_SIZE,
-                    chunk_overlap=100,
+                    chunk_overlap=CHUNK_OVERLAP,
                     separators=["\n\n", "\n", " ", ""]
                 )
                 
@@ -246,68 +260,57 @@ class PDFProcessor:
         doc.close()
         return chunks, parent_map
 
-    def _auto_detect_noise(self, doc: fitz.Document) -> List[str]:
+    def _detect_safe_margins(self, doc: fitz.Document, num_samples: int = 20) -> Tuple[float, float]:
         """
-        Analyze start/end pages to find repetitive header/footer patterns.
-        Strategy:
-        1. Sample first 3 and last 3 pages.
-        2. Split into lines.
-        3. Count frequency of exact line matches.
-        4. Lines appearing in >50% of sampled pages are noise.
+        Automatically detect safe top and bottom margins by analyzing physical blocks.
         """
-        sample_pages = []
+        print(f"      [DEBUG] Detecting safe margins using {num_samples} samples...")
         page_count = len(doc)
+        if page_count == 0: return 0.0, 0.0
         
-        # Select sample indices
-        indices = list(range(min(3, page_count)))
-        if page_count > 3:
-            indices.extend(range(max(3, page_count - 3), page_count))
+        # Sample uniformly
+        step = max(1, page_count // num_samples)
+        indices = sorted(list(set([0, page_count-1] + [i for i in range(0, page_count, step)][:num_samples])))
         
-        indices = sorted(list(set(indices))) # Dedup
-        if not indices: return []
-
-        line_counts = {}
+        page_height = doc[0].rect.height
+        top_y1_candidates = []
+        bottom_y0_candidates = []
+        
         for idx in indices:
             try:
-                page_text = doc[idx].get_text()
+                page = doc[idx]
+                blocks = page.get_text("blocks")
+                # Filter text blocks (type 0)
+                text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
+                
+                for b in text_blocks:
+                    y0, y1 = b[1], b[3]
+                    # Top 12% is considered header zone
+                    if y0 < page_height * 0.12:
+                        top_y1_candidates.append(y1)
+                    # Bottom 12% is considered footer zone
+                    elif y1 > page_height * 0.88:
+                        bottom_y0_candidates.append(y0)
             except:
                 continue
-            lines = [l.strip() for l in page_text.split('\n') if l.strip()]
-            
-            # Use set to count only once per page (avoid counting repeated lines within a page)
-            unique_lines = set(lines)
-            
-            for line in unique_lines:
-                if len(line) < 4: continue # Skip very short noise
-                if len(line) > 100: continue # Skip actual content paragraphs
                 
-                line_counts[line] = line_counts.get(line, 0) + 1
+        # Calculate cutoffs
+        # Safe top: just below the lowest header block found
+        final_top = max(top_y1_candidates) + 2 if top_y1_candidates else 0.0
+        # Safe bottom: just above the highest footer block found
+        final_bottom = min(bottom_y0_candidates) - 2 if bottom_y0_candidates else page_height
         
-        noise_patterns = []
-        threshold = len(indices) * 0.5 # Appear in more than 50% of sampled pages
-        
-        for line, count in line_counts.items():
-            if count > threshold:
-                # Escape for regex and add to patterns
-                # Handle potential special chars in headers
-                escaped = re.escape(line)
-                # Match strict full line behavior to avoid partial replacement of valid text
-                # We can replace the line entirely.
-                noise_patterns.append(escaped)
-                
-        return noise_patterns
+        return float(final_top), float(final_bottom)
 
-    def _apply_cleaning(self, text: str, patterns: List[str]) -> str:
+    def _apply_cleaning(self, text: str) -> str:
         """
-        Apply regex rules to clean text.
+        Apply remaining specific cleaning rules to the markdown text.
+        Bbox clipping handles most header/footer issues.
         """
-        # Basic feedback removal as per plan
+        # Remove hardcoded feedback links
         text = re.sub(r'\[Feedback\]\(mailto:[^)]+\)', '', text)
         
-        # Apply detected patterns
-        for pat in patterns:
-            # We assume these patterns are full lines or significant parts of lines
-            # Replace with empty string
-            text = re.sub(pat, '', text)
-            
-        return text
+        # Remove empty lines resulting from clipping or cleaning
+        lines = [line for line in text.split('\n')]
+        # Optional: remove redundant empty lines at start/end
+        return "\n".join(lines).strip()

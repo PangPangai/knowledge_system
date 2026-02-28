@@ -160,9 +160,8 @@ class AgenticRAGGraph:
                     print(f"   ❌ (Fallback) Doc {i+1} is NOT relevant")
         
         if relevant_docs:
-            # key fix: Do NOT filter out documents. Keep original context for generation to avoid false negatives.
-            # We only use grading to decide whether to Rewrite or Generate.
-            # state["documents"] = relevant_docs  <-- DISABLED FILTERING
+            # key fix: Do filter out documents to avoid feeding irrelevant chunks into parent_node expansion.
+            state["documents"] = relevant_docs
             state["grade_decision"] = "relevant"
             print(f"🎯 Grading passed: found {len(relevant_docs)} relevant docs (process all)")
         else:
