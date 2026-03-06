@@ -3,6 +3,8 @@ Agentic RAG using LangGraph
 Implements: Router → Retrieve → Grade → Rewrite → Generate workflow
 """
 
+import json
+import asyncio
 from typing import TypedDict, List, Literal
 from langchain_core.documents import Document
 from langgraph.graph import StateGraph, END
@@ -114,9 +116,25 @@ class AgenticRAGGraph:
         print(f"   Retrieved {len(documents)} relevant documents after expansion & rerank")
         return state
     
+    async def _grade_single_doc(self, question: str, doc: Document, index: int):
+        """Grade a single document for relevance (used concurrently)."""
+        doc_snippet = doc.page_content[:1000]
+        grade_msg = GRADE_PROMPT.format(question=question, document_snippet=doc_snippet)
+        try:
+            response = await self.rag_engine.llm.ainvoke(grade_msg)
+            content = response.content.replace('```json', '').replace('```', '').strip()
+            grade_data = json.loads(content)
+            score = grade_data.get("score", "no").lower()
+            reason = grade_data.get("reason", "No reason provided")
+            return (index, doc, "yes" in score, reason)
+        except Exception as e:
+            # Fallback: check raw content for "yes"
+            is_relevant = "yes" in (response.content.lower() if 'response' in dir() else "")
+            return (index, doc, is_relevant, str(e))
+
     async def grade_node(self, state: AgentState) -> AgentState:
         """
-        Grade: Evaluate relevance of retrieved documents
+        Grade: Evaluate relevance of retrieved documents (concurrent LLM calls).
         """
         documents = state["documents"]
         question = state["current_query"]
@@ -126,44 +144,27 @@ class AgenticRAGGraph:
             print("⚠️  No documents retrieved")
             return state
         
-        # Robust Multi-Document Grading
-        relevant_docs = []
-        print(f"📝 Grading {len(documents)} documents...")
+        print(f"📝 Grading {len(documents)} documents (concurrently)...")
         
-        for i, doc in enumerate(documents):
-            # Limit content to first 1000 chars for grading to save tokens
-            doc_snippet = doc.page_content[:1000]
-            
-            grade_msg = GRADE_PROMPT.format(question=question, document_snippet=doc_snippet)
-            
-            response = await self.rag_engine.llm.ainvoke(grade_msg)
-            import json
-            try:
-                # Basic cleanup for JSON parsing (remove markdown fences if present)
-                content = response.content.replace('```json', '').replace('```', '').strip()
-                grade_data = json.loads(content)
-                score = grade_data.get("score", "no").lower()
-                reason = grade_data.get("reason", "No reason provided")
-                
-                if "yes" in score:
-                    print(f"   ✅ Doc {i+1} is relevant. Reason: {reason}")
-                    relevant_docs.append(doc)
-                else:
-                    print(f"   ❌ Doc {i+1} is NOT relevant. Reason: {reason}")
-            except Exception as e:
-                print(f"   ⚠️ Grading JSON parse error: {e}. Raw content: {response.content}")
-                # Fallback: if yes is in content, assume relevant
-                if "yes" in response.content.lower():
-                    print(f"   ✅ (Fallback) Doc {i+1} is relevant")
-                    relevant_docs.append(doc)
-                else:
-                    print(f"   ❌ (Fallback) Doc {i+1} is NOT relevant")
+        # Fire all grading requests concurrently
+        tasks = [
+            self._grade_single_doc(question, doc, i)
+            for i, doc in enumerate(documents)
+        ]
+        results = await asyncio.gather(*tasks)
+        
+        relevant_docs = []
+        for index, doc, is_relevant, reason in sorted(results, key=lambda x: x[0]):
+            if is_relevant:
+                print(f"   ✅ Doc {index+1} is relevant. Reason: {reason}")
+                relevant_docs.append(doc)
+            else:
+                print(f"   ❌ Doc {index+1} is NOT relevant. Reason: {reason}")
         
         if relevant_docs:
-            # key fix: Do filter out documents to avoid feeding irrelevant chunks into parent_node expansion.
             state["documents"] = relevant_docs
             state["grade_decision"] = "relevant"
-            print(f"🎯 Grading passed: found {len(relevant_docs)} relevant docs (process all)")
+            print(f"🎯 Grading passed: {len(relevant_docs)}/{len(documents)} relevant docs")
         else:
             state["grade_decision"] = "not_relevant"
             print("❌ No relevant documents found after grading")
@@ -189,7 +190,8 @@ class AgenticRAGGraph:
     
     async def generate_node(self, state: AgentState) -> AgentState:
         """
-        Generate: Produce final answer
+        Generate: Produce final answer using Reasoning model (deepseek-reasoner).
+        Falls back to standard llm if llm_thinking is not configured.
         """
         question = state["question"]
         documents = state["documents"]
@@ -205,48 +207,8 @@ class AgenticRAGGraph:
         if route_decision == "generate" or not documents:
             context = "No specific context needed."
         else:
-            # Enrich context with parent documents for better generation quality
-            # Expand child chunks to parent chunks HERE, just before generation
             parent_docs = self.rag_engine._expand_to_parent(documents)
             context_docs = parent_docs if parent_docs else documents
-            
-            # Enrich context with surrounding chunks
-            context = self._format_context(context_docs)
-        
-        # Use detailed system prompt matching traditional RAG quality
-        system_prompt = GENERATION_SYSTEM_PROMPT
-        
-        user_prompt = question
-        
-        # Generate answer using formatted prompt
-        from langchain_core.messages import SystemMessage, HumanMessage
-        messages = [
-            SystemMessage(content=system_prompt.format(context=context)),
-            HumanMessage(content=user_prompt)
-        ]
-        
-        response = await self.rag_engine.llm.ainvoke(messages)
-        answer = response.content
-        
-        state["generation"] = answer
-        print(f"💬 Generated answer ({len(answer)} chars)")
-        
-        return state
-    
-    async def generate_stream(self, question: str, documents: List[Document]):
-        """
-        Stream generate answer for Agentic RAG
-        
-        Yields:
-            str: Chunks of the generated answer
-        """
-        if not documents:
-            context = "No specific context needed."
-        else:
-            # Expand child chunks to parent chunks for streaming generation too
-            parent_docs = self.rag_engine._expand_to_parent(documents)
-            context_docs = parent_docs if parent_docs else documents
-            
             context = self._format_context(context_docs)
         
         system_prompt = GENERATION_SYSTEM_PROMPT
@@ -257,7 +219,43 @@ class AgenticRAGGraph:
             HumanMessage(content=question)
         ]
         
-        async for chunk in self.rag_engine.llm.astream(messages):
+        # Use Reasoning model for all generation; fallback to standard llm if not configured
+        llm = self.rag_engine.llm_thinking or self.rag_engine.llm
+        response = await llm.ainvoke(messages)
+        answer = response.content
+        
+        state["generation"] = answer
+        model_tag = "reasoner" if self.rag_engine.llm_thinking else "chat"
+        print(f"💬 Generated answer ({len(answer)} chars) [{model_tag}]")
+        
+        return state
+    
+    async def generate_stream(self, question: str, documents: List[Document]):
+        """
+        Stream generate answer for Agentic RAG using Reasoning model.
+        Falls back to standard llm if llm_thinking is not configured.
+        
+        Yields:
+            str: Chunks of the generated answer
+        """
+        if not documents:
+            context = "No specific context needed."
+        else:
+            parent_docs = self.rag_engine._expand_to_parent(documents)
+            context_docs = parent_docs if parent_docs else documents
+            context = self._format_context(context_docs)
+        
+        system_prompt = GENERATION_SYSTEM_PROMPT
+        
+        from langchain_core.messages import SystemMessage, HumanMessage
+        messages = [
+            SystemMessage(content=system_prompt.format(context=context)),
+            HumanMessage(content=question)
+        ]
+        
+        # Use Reasoning model for streaming; fallback to standard llm if not configured
+        llm = self.rag_engine.llm_thinking or self.rag_engine.llm
+        async for chunk in llm.astream(messages):
             if chunk.content:
                 yield chunk.content
     

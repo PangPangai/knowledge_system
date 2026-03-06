@@ -43,3 +43,15 @@ backend/*.bak
 
 # Ignored specific PDFs
 "fusion compiler error messages.pdf"
+
+# Temporary scripts
+convert_to_light.py
+make_premium_light.py
+
+# PPT workspace
+ppt_workspace/
+ppt_workspace_light/
+ppt_workspace_premium_light/
+
+# Generated files
+backend/latest_converted.md

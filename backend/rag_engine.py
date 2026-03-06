@@ -348,85 +348,53 @@ class AdvancedRAGEngine:
     
     def __init__(self):
         # Load configuration from environment
-        # Load configuration from environment
         self.persist_directory = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
         
         # ---------------------------------------------------------
-        # 1. Chat Provider Configuration
+        # 1. Unified Model Configuration (OpenAI-compatible)
         # ---------------------------------------------------------
-        self.chat_provider = os.getenv("CHAT_PROVIDER", "zhipu").lower()
-        print(f"🚀 Initializing Chat Engine (Provider: {self.chat_provider})")
         
-        if self.chat_provider == "deepseek":
-            self.chat_api_key = os.getenv("DEEPSEEK_API_KEY")
-            self.chat_api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
-            self.chat_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-            
-        elif self.chat_provider == "openai":
-            self.chat_api_key = os.getenv("OPENAI_API_KEY")
-            self.chat_api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
-            self.chat_model = os.getenv("OPENAI_MODEL", "gpt-4-turbo")
+        # Chat Model
+        self.chat_api_key = os.getenv("CHAT_API_KEY")
+        self.chat_api_base = os.getenv("CHAT_API_BASE", "https://api.deepseek.com/v1")
+        self.chat_model = os.getenv("CHAT_MODEL", "deepseek-chat")
+        self.chat_thinking_model = os.getenv("CHAT_THINKING_MODEL", "")
 
-        elif self.chat_provider == "siliconflow":
-            self.chat_api_key = os.getenv("SILICONFLOW_API_KEY")
-            self.chat_api_base = os.getenv("SILICONFLOW_API_BASE", "https://api.siliconflow.cn/v1")
-            self.chat_model = os.getenv("SILICONFLOW_CHAT_MODEL", "deepseek-ai/DeepSeek-V3")
-            
-        else: # Default to zhipu
-            self.chat_api_key = os.getenv("ZHIPU_API_KEY")
-            self.chat_api_base = os.getenv("ZHIPU_API_BASE", "https://open.bigmodel.cn/api/paas/v4/")
-            self.chat_model = os.getenv("ZHIPU_CHAT_MODEL", "glm-4-flash")
+        # Embedding Model
+        self.embedding_api_key = os.getenv("EMBEDDING_API_KEY")
+        self.embedding_api_base = os.getenv("EMBEDDING_API_BASE", "https://api.siliconflow.cn/v1")
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 
-        # ---------------------------------------------------------
-        # 2. Embedding/Rerank Provider Configuration
-        # ---------------------------------------------------------
-        self.embedding_provider = os.getenv("EMBEDDING_PROVIDER", "zhipu").lower()
-        print(f"🚀 Initializing Embedding Engine (Provider: {self.embedding_provider})")
-
-        if self.embedding_provider == "siliconflow":
-            self.embedding_api_key = os.getenv("SILICONFLOW_API_KEY")
-            self.embedding_api_base = os.getenv("SILICONFLOW_API_BASE", "https://api.siliconflow.cn/v1")
-            self.embedding_model = os.getenv("SILICONFLOW_EMBEDDING_MODEL", "BAAI/bge-m3")
-        else:
-            # Default to Zhipu
-            self.embedding_api_key = os.getenv("ZHIPU_API_KEY")
-            self.embedding_api_base = os.getenv("ZHIPU_API_BASE", "https://open.bigmodel.cn/api/paas/v4/")
-            self.embedding_model = os.getenv("ZHIPU_EMBEDDING_MODEL", "embedding-2")
-        
-        # Advanced RAG settings
+        # Rerank Settings
         self.rerank_enabled = os.getenv("RERANK_ENABLED", "true").lower() == "true"
-        # Rerank model selection based on provider
-        if self.embedding_provider == "siliconflow":
-            self.rerank_model = os.getenv("SILICONFLOW_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
-        else:
-            self.rerank_model = os.getenv("RERANK_MODEL", "embedding-rank")
-        self.retrieval_top_k = int(os.getenv("RETRIEVAL_TOP_K", "20"))
-        self.rerank_top_n = int(os.getenv("RERANK_TOP_N", "5"))
-        self.chunk_size = int(os.getenv("CHUNK_SIZE", "500"))
-        self.chunk_overlap = int(os.getenv("CHUNK_OVERLAP", "100"))
+        self.rerank_api_key = os.getenv("RERANK_API_KEY", self.embedding_api_key)
+        self.rerank_api_base = os.getenv("RERANK_API_BASE", self.embedding_api_base)
+        self.rerank_model = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
         
-        print(f"🚀 Initializing Advanced RAG Engine (Multi-Provider)")
+        # RAG Parameters
+        self.retrieval_top_k = int(os.getenv("RETRIEVAL_TOP_K", "100"))
+        self.rerank_top_n = int(os.getenv("RERANK_TOP_N", "20"))
+        self.chunk_size = int(os.getenv("CHUNK_SIZE", "1500"))
+        self.chunk_overlap = int(os.getenv("CHUNK_OVERLAP", "200"))
+        
+        print(f"🚀 Initializing Advanced RAG Engine (Unified Config)")
         print(f"   📝 Chat: {self.chat_api_base} / {self.chat_model}")
+        if self.chat_thinking_model:
+            print(f"   🧠 Thinking: {self.chat_thinking_model}")
         print(f"   🔢 Embedding: {self.embedding_api_base} / {self.embedding_model}")
-        print(f"   Rerank Enabled: {self.rerank_enabled}")
-        print(f"   Retrieval Top-K: {self.retrieval_top_k}")
-        print(f"   Rerank Top-N: {self.rerank_top_n}")
-        print(f"   Rerank Top-N: {self.rerank_top_n}")
-        print(f"   Chunk Size: {self.chunk_size}")
-
-        # OCR Configuration (Disabled per user request)
-        # self.ocr_model = os.getenv("SILICONFLOW_OCR_MODEL", "PaddlePaddle/PaddleOCR-VL-1.5")
-        
+        if self.rerank_enabled:
+            print(f"   🎯 Rerank: {self.rerank_api_base} / {self.rerank_model}")
+        print(f"   Parameters: top_k={self.retrieval_top_k}, top_n={self.rerank_top_n}, chunk={self.chunk_size}")
 
         # Initialize database
         self.db = ChatHistoryDB()
         
-        # Initialize embeddings (using Embedding provider, e.g., Zhipu)
+        # Initialize embeddings (Standard OpenAI-compatible)
         self.embeddings = OpenAIEmbeddings(
             openai_api_key=self.embedding_api_key,
             openai_api_base=self.embedding_api_base,
             model=self.embedding_model,
-            chunk_size=16  # API batch limit
+            chunk_size=16
         )
         
         # Initialize vector store
@@ -442,30 +410,33 @@ class AdvancedRAGEngine:
         # Load parent documents from persistence
         self.parent_docs: Dict[str, Dict[str, str]] = self._load_parent_docs()
         
-        # Load Tool Configuration (for Disambiguation)
+        # Load Tool Configuration
         self.tool_config_path = os.path.join(os.path.dirname(__file__), "tools_config.json")
         self.tool_config = self._load_tool_config()
         
-        # Initialize reranker based on provider
+        # Initialize reranker (Unified implementation)
         if self.rerank_enabled:
-            if self.embedding_provider == "siliconflow":
+            # We can use a single Reranker class that handles OpenAI-compatible Rerank APIs
+            # For now, let's stick to SiliconFlow style if base is siliconflow, else Fallback
+            if "siliconflow" in self.rerank_api_base.lower():
                 self.reranker = SiliconFlowReranker(
-                    api_key=self.embedding_api_key,
-                    api_base=self.embedding_api_base,
+                    api_key=self.rerank_api_key,
+                    api_base=self.rerank_api_base,
                     model=self.rerank_model
                 )
-                print(f"   🎯 Reranker: SiliconFlow / {self.rerank_model}")
             else:
-                self.reranker = ZhipuReranker(
-                    api_key=self.embedding_api_key,
-                    api_base=self.embedding_api_base,
+                # Fallback to a general reranker or existing ZhipuReranker logic 
+                # tweaked for unified base/url
+                self.reranker = SiliconFlowReranker( # Reusing SiliconFlowReranker as it's standard OpenAI-like
+                    api_key=self.rerank_api_key,
+                    api_base=self.rerank_api_base,
                     model=self.rerank_model
                 )
-                print(f"   🎯 Reranker: Zhipu / {self.rerank_model}")
         else:
             self.reranker = None
         
-        # Initialize LLM (using Chat provider, e.g., DeepSeek)
+        # Initialize LLM instances
+        # 1. Standard LLM
         self.llm = ChatOpenAI(
             openai_api_key=self.chat_api_key,
             openai_api_base=self.chat_api_base,
@@ -473,6 +444,17 @@ class AdvancedRAGEngine:
             temperature=0.3,
             streaming=False
         )
+        # 2. Thinking LLM (Optional)
+        if self.chat_thinking_model:
+            self.llm_thinking = ChatOpenAI(
+                openai_api_key=self.chat_api_key,
+                openai_api_base=self.chat_api_base,
+                model_name=self.chat_thinking_model,
+                temperature=0.3, # Thinking models usually ignore temp or need it low
+                streaming=False
+            )
+        else:
+            self.llm_thinking = None
         
         # Text splitter for chunking
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -1003,57 +985,37 @@ class AdvancedRAGEngine:
 
     def _compute_search_weights(self, query: str) -> Tuple[float, float]:
         """
-        Compute dynamic weights for vector and BM25 search based on query type.
-        
-        Returns:
-            (vector_weight, bm25_weight) tuple, sum = 1.0
+        Return configurable hybrid search weights from environment variables.
+        Defaults to (0.5, 0.5) if not set. Precision is handled by the Reranker.
         """
-        import re
-        # EDA command patterns: set_xxx, get_xxx, report_xxx etc.
-        eda_cmd_pattern = r'\b(set|get|report|check|remove|reset|create|read)_\w+'
-        
-        if re.search(eda_cmd_pattern, query, re.IGNORECASE):
-            return (0.3, 0.7)  # Favor BM25 for exact command lookup
-        
-        # Short keyword-style queries favor BM25
-        if len(query.split()) <= 3 and not any(c in query for c in '？?怎么如何什么'):
-            return (0.4, 0.6)
-        
-        # Load defaults from env
         try:
             v_w = float(os.getenv("VECTOR_WEIGHT", "0.5"))
             b_w = float(os.getenv("BM25_WEIGHT", "0.5"))
             total = v_w + b_w
-            return (v_w/total, b_w/total)
-        except:
+            if total <= 0:
+                return (0.5, 0.5)
+            return (v_w / total, b_w / total)
+        except (ValueError, TypeError):
             return (0.5, 0.5)
     
     def _rerank_documents(self, query: str, documents: List[Document], top_n: int) -> List[Document]:
         """
-        Rerank documents using the reranker
-        
-        Args:
-            query: Original query
-            documents: Documents to rerank
-            top_n: Number of top results to return
-            
-        Returns:
-            Reranked list of documents
+        Rerank documents using the reranker.
+        Stores rerank_score in doc.metadata for downstream confidence thresholding.
         """
         if not self.reranker or not documents:
             return documents[:top_n]
         
-        # Extract document contents
         doc_contents = [doc.page_content for doc in documents]
-        
-        # Get reranked indices
         reranked = self.reranker.rerank(query, doc_contents, top_n=top_n)
         
-        # Return reranked documents
         result = []
         for idx, score in reranked:
             if idx < len(documents):
-                result.append(documents[idx])
+                doc = documents[idx]
+                # Store rerank score for downstream use (e.g., confidence thresholding)
+                doc.metadata["rerank_score"] = score
+                result.append(doc)
         
         return result
     
@@ -1156,11 +1118,8 @@ class AdvancedRAGEngine:
                 }
             )
             parent_docs.append(parent_doc)
-        
         return parent_docs
-        
-        return parent_docs
-    
+
     
     def _get_tool_label(self, filename: str) -> str:
         """Map filename to tool label using loaded config"""
@@ -1183,55 +1142,45 @@ class AdvancedRAGEngine:
         import re
         question_lower = question.lower()
         
-        target_tool = None
-        
-        # 1. Identify which tool is mentioned in the question
+        # 1. Collect all tools mentioned in the question (support multi-tool queries)
+        mentioned_tools = []
         for tool in self.tool_config.get("tools", []):
             keywords = tool.get("query_keywords", [])
-            # Construct regex pattern from keywords: \b(kw1|kw2)\b
-            # Escape keywords to avoid regex errors
             escaped_kws = [re.escape(k) for k in keywords]
             pattern = r'\b(' + '|'.join(escaped_kws) + r')\b'
-            
             if re.search(pattern, question_lower):
-                target_tool = tool
-                break
+                mentioned_tools.append(tool)
         
-        # If no specific tool mentioned, return all docs
-        if not target_tool:
+        # If no specific tool mentioned, return all docs as-is
+        if not mentioned_tools:
             return documents
-            
-        print(f"   📌 Source filter: prioritizing documents from {target_tool['name']}")
         
-        # 2. Filter documents
-        matching_docs = []
-        other_docs = []
+        # Collect all filename patterns for mentioned tools
+        target_patterns = []
+        for tool in mentioned_tools:
+            target_patterns.extend(tool.get("filename_patterns", []))
         
-        target_filename_patterns = target_tool.get("filename_patterns", [])
+        tool_names = [t['name'] for t in mentioned_tools]
+        print(f"   📌 Source tagging: targeting {tool_names}")
         
+        # 2. Tag docs with source_role — NO TRUNCATION
+        # Reranker and Grade will decide relevance.
+        primary = []
+        supplementary = []
         for doc in documents:
             source = doc.metadata.get("source", "").lower()
-            # Check if source matches the target tool's filename patterns
-            is_match = False
-            for pattern in target_filename_patterns:
-                if pattern in source:
-                    is_match = True
-                    break
-            
+            is_match = any(p in source for p in target_patterns)
             if is_match:
                 doc.metadata["source_role"] = "primary"
-                matching_docs.append(doc)
+                primary.append(doc)
             else:
                 doc.metadata["source_role"] = "supplementary"
-                other_docs.append(doc)
+                supplementary.append(doc)
         
-        print(f"   📊 Found {len(matching_docs)} matching docs, {len(other_docs)} other docs")
+        print(f"   📊 Source tagging: {len(primary)} primary, {len(supplementary)} supplementary")
         
-        # Hard limit: keep at most 1 supplementary doc
-        MAX_OTHER_DOCS = 1
-        result = matching_docs + other_docs[:MAX_OTHER_DOCS]
-        
-        return result
+        # Return primary first, then supplementary — all preserved
+        return primary + supplementary
     
     def _enrich_context(self, documents: List[Document], question: str = "") -> str:
         """
