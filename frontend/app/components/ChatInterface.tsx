@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import ExportButtons from './ExportButtons';
@@ -14,11 +14,17 @@ interface Source {
 }
 
 interface Message {
+    _uid: string;
     id?: number;
     role: 'user' | 'assistant';
     content: string;
+    reasoning?: string;
     sources?: Source[];
 }
+
+// Global counter for stable message IDs
+let msgCounter = 0;
+const genMsgId = () => `msg-${++msgCounter}`;
 
 interface ChatInterfaceProps {
     conversationId: string | null;
@@ -32,8 +38,11 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
     const [isStreaming, setIsStreaming] = useState(false); // Prevent message override during streaming
     const [useAgenticRAG, setUseAgenticRAG] = useState(true); // Toggle for Agentic RAG
     const [activeSource, setActiveSource] = useState<Source | null>(null);
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const rafRef = useRef<number | null>(null);
+    const prevMsgCountRef = useRef(0);
 
     // Auto-resize textarea
     useEffect(() => {
@@ -60,7 +69,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                 const res = await fetch(`http://localhost:8000/history/${conversationId}`);
                 if (res.ok) {
                     const data = await res.json();
-                    setMessages(data);
+                    setMessages(data.map((m: any) => ({ ...m, _uid: genMsgId() })));
                 }
             } catch (error) {
                 console.error("Failed to load conversation", error);
@@ -70,10 +79,21 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
         fetchMessages();
     }, [conversationId, isStreaming]);
 
-    // Scroll to bottom on new messages
+    // Scroll to bottom and track message count
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages, isLoading]);
+        prevMsgCountRef.current = messages.length;
+
+        const container = scrollContainerRef.current;
+        if (!container) return;
+
+        if (isStreaming) {
+            // During streaming: instant scroll, no animation overhead
+            container.scrollTop = container.scrollHeight;
+        } else {
+            // After streaming: smooth scroll for polish
+            container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        }
+    }, [messages, isLoading, isStreaming]);
 
     const handleSubmit = async (e?: React.FormEvent) => {
         e?.preventDefault();
@@ -83,7 +103,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
         setInput('');
         if (textareaRef.current) textareaRef.current.style.height = 'auto'; // Reset height
 
-        const userMessage: Message = { role: 'user', content: currentInput };
+        const userMessage: Message = { _uid: genMsgId(), role: 'user', content: currentInput };
         setMessages(prev => [...prev, userMessage]);
         setIsLoading(true);
         setIsStreaming(true); // Prevent useEffect from overriding local messages
@@ -108,7 +128,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
             if (!reader) throw new Error('No reader available');
 
             const decoder = new TextDecoder();
-            let assistantMessage: Message = { role: 'assistant', content: '', sources: [] };
+            let assistantMessage: Message = { _uid: genMsgId(), role: 'assistant', content: '', sources: [] };
             setMessages(prev => [...prev, assistantMessage]);
 
             let buffer = '';
@@ -126,41 +146,68 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                 // Keep the last part in the buffer as it might be incomplete
                 buffer = lines.pop() || '';
 
+                let incrementalContent = '';
+                let incrementalReasoning = '';
+                let newSources: Source[] | undefined = undefined;
+
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
                         try {
                             const data = JSON.parse(line.slice(6));
 
                             if (data.type === 'metadata') {
-                                assistantMessage.sources = data.sources;
+                                newSources = data.sources;
                                 if (data.conversation_id && !conversationId) {
                                     onConversationIdChange(data.conversation_id);
                                 }
                             } else if (data.type === 'content') {
-                                assistantMessage.content += data.content;
+                                incrementalContent += data.content;
+                                assistantMessage.content += data.content; // sync external for finally block
+                            } else if (data.type === 'reasoning') {
+                                incrementalReasoning += data.content;
                             } else if (data.type === 'done') {
                                 // Stream finished signal
                             }
-
-                            // Update UI
-                            setMessages(prev => {
-                                const newMessages = [...prev];
-                                newMessages[newMessages.length - 1] = { ...assistantMessage };
-                                return newMessages;
-                            });
                         } catch (e) {
                             console.error('Error parsing SSE:', e);
                         }
                     }
                 }
+
+                if (incrementalContent || incrementalReasoning || newSources) {
+                    setMessages(prev => {
+                        const newMessages = [...prev];
+                        const lastIdx = newMessages.length - 1;
+                        const prevLastMsg = newMessages[lastIdx];
+
+                        newMessages[lastIdx] = {
+                            ...prevLastMsg,
+                            content: prevLastMsg.content + incrementalContent,
+                            reasoning: (prevLastMsg.reasoning || '') + incrementalReasoning,
+                            sources: newSources || prevLastMsg.sources
+                        };
+                        return newMessages;
+                    });
+                }
             }
         } catch (error) {
             console.error('Chat error:', error);
             setMessages(prev => [...prev, {
+                _uid: genMsgId(),
                 role: 'assistant',
                 content: '⚠️ 网络连接错误，请检查后端服务。'
             }]);
         } finally {
+            // Trigger a final sync update to ensure we render the final markdown
+            setMessages(prev => {
+                const newMessages = [...prev];
+                // Make sure we have an assistant message to update
+                if (newMessages.length > 0 && newMessages[newMessages.length - 1].role === 'assistant') {
+                    // Force a new reference for the last message so React un-memoizes it for the final MD render
+                    newMessages[newMessages.length - 1] = { ...newMessages[newMessages.length - 1] };
+                }
+                return newMessages;
+            });
             setIsLoading(false);
             setIsStreaming(false); // Allow history fetching again
         }
@@ -176,7 +223,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
     return (
         <div className="flex flex-col h-full relative">
             {/* Messages Container - min-h-0 enables flex child scrolling, pb-52 for input area */}
-            <div className="flex-1 min-h-0 overflow-y-auto pt-8 pb-52">
+            <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto pt-8 pb-52 scroll-smooth-disabled">
                 {messages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-full text-center px-6 animate-slide-up">
                         <div className="w-20 h-20 bg-gradient-to-br from-[var(--accent-primary)] to-[var(--accent-secondary)] rounded-[2rem] flex items-center justify-center shadow-[var(--shadow-island)] mb-8">
@@ -197,83 +244,18 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
                 ) : (
                     <div className="msg-container space-y-8">
                         {messages.map((message, index) => (
-                            <div
-                                key={index}
-                                className={`flex flex-col animate-slide-up ${message.role === 'user' ? 'items-end' : 'items-start'}`}
-                            >
-                                {/* Role Label */}
-                                <div className={`text-xs font-semibold mb-2 px-1 ${message.role === 'user' ? 'text-[var(--text-tertiary)]' : 'text-[var(--accent-primary)]'}`}>
-                                    {message.role === 'user' ? 'YOU' : 'AI ASSISTANT'}
-                                </div>
-
-                                {message.role === 'user' ? (
-                                    <div className="msg-user text-[15px] shadow-sm">
-                                        <div className="whitespace-pre-wrap">{message.content}</div>
-                                    </div>
-                                ) : (
-                                    <div id={`qa-pair-${index}`} className="msg-assistant w-full group/msg">
-                                        <div className="prose prose-slate max-w-none">
-                                            {message.content ? (
-                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                                            ) : (
-                                                <div className="flex items-center gap-2 text-[var(--text-secondary)] py-2">
-                                                    <span className="relative flex h-3 w-3">
-                                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--accent-primary)] opacity-75"></span>
-                                                        <span className="relative inline-flex rounded-full h-3 w-3 bg-[var(--accent-primary)]"></span>
-                                                    </span>
-                                                    <span className="text-sm font-medium animate-pulse">思考中...</span>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Sources Island */}
-                                        {message.sources && message.sources.length > 0 && (
-                                            <div className="mt-6">
-                                                <div className="flex items-center gap-2 mb-3 text-xs font-medium text-[var(--text-tertiary)] uppercase tracking-wide">
-                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
-                                                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
-                                                    </svg>
-                                                    参考来源 ({message.sources.length})
-                                                </div>
-                                                <div className="flex gap-3 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
-                                                    {message.sources.map((source, idx) => (
-                                                        <div
-                                                            key={idx}
-                                                            onClick={() => setActiveSource(source)}
-                                                            className="source-card group transition-all hover:-translate-y-1 cursor-pointer hover:shadow-md hover:border-[var(--accent-primary)]/30 active:scale-95"
-                                                        >
-                                                            <div className="font-semibold text-[var(--accent-secondary)] mb-1.5 truncate flex items-center gap-1">
-                                                                <svg className="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-                                                                {source.source.replace('.md', '').replace('.pdf', '')}
-                                                            </div>
-                                                            <div className="text-[var(--text-tertiary)] text-[10px] uppercase font-mono mb-2">
-                                                                {source.section || `Chunk ${source.chunk_id}`}
-                                                            </div>
-                                                            <div className="text-[var(--text-secondary)] line-clamp-3 leading-relaxed">
-                                                                {source.content}
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Export Buttons */}
-                                        {message.content && !isStreaming && (
-                                            <ExportButtons
-                                                question={messages[index - 1]?.content || ''}
-                                                answer={message.content}
-                                                answerId={`qa-pair-${index}`}
-                                            />
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-
+                            <MessageBubble
+                                key={message._uid}
+                                message={message}
+                                index={index}
+                                isStreaming={isStreaming}
+                                isLastMessage={index === messages.length - 1}
+                                isNewMessage={index >= prevMsgCountRef.current}
+                                prevContent={index > 0 ? messages[index - 1]?.content : ''}
+                                setActiveSource={setActiveSource}
+                            />
                         ))}
-
-
+                        {/* Empty div for scroll target if needed */}
                         <div ref={messagesEndRef} />
                     </div>
                 )}
@@ -379,3 +361,133 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
         </div >
     );
 }
+
+// Extracted and memoized Message component
+interface MessageBubbleProps {
+    message: Message;
+    index: number;
+    isStreaming: boolean;
+    isLastMessage: boolean;
+    isNewMessage: boolean;
+    prevContent?: string;
+    setActiveSource: (source: Source) => void;
+}
+
+const MessageBubble = React.memo(function MessageBubble({
+    message,
+    index,
+    isStreaming,
+    isLastMessage,
+    isNewMessage,
+    setActiveSource
+}: MessageBubbleProps) {
+    return (
+        <div
+            className={`flex flex-col ${isNewMessage ? 'animate-slide-up' : ''} ${message.role === 'user' ? 'items-end' : 'items-start'}`}
+        >
+            {/* Role Label */}
+            <div className={`text-xs font-semibold mb-2 px-1 ${message.role === 'user' ? 'text-[var(--text-tertiary)]' : 'text-[var(--accent-primary)]'}`}>
+                {message.role === 'user' ? 'YOU' : 'AI ASSISTANT'}
+            </div>
+
+            {message.role === 'user' ? (
+                <div className="msg-user text-[15px] shadow-sm">
+                    <div className="whitespace-pre-wrap">{message.content}</div>
+                </div>
+            ) : (
+                <div id={`qa-pair-${index}`} className="msg-assistant w-full group/msg">
+                    {/* Reasoning Panel */}
+                    {message.reasoning && (
+                        <details
+                            className="group mb-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] overflow-hidden text-sm transition-shadow hover:shadow-sm"
+                            open={isStreaming && isLastMessage && !message.content}
+                        >
+                            <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 font-medium text-[var(--text-secondary)] hover:text-[var(--accent-primary)] transition-colors outline-none select-none">
+                                <span className="relative flex h-3 w-3">
+                                    {(isStreaming && isLastMessage && !message.content) ? (
+                                        <>
+                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--accent-primary)] opacity-75"></span>
+                                            <span className="relative inline-flex rounded-full h-3 w-3 bg-[var(--accent-primary)]"></span>
+                                        </>
+                                    ) : (
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[var(--text-tertiary)]"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                    )}
+                                </span>
+                                <span>{(isStreaming && isLastMessage && !message.content) ? "深度思考与知识检索中..." : "查看思考过程"}</span>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="ml-auto transition-transform duration-200 group-open:rotate-180 opacity-50"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                            </summary>
+                            <div className="px-5 py-3 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] whitespace-pre-wrap font-mono text-[13px] leading-relaxed">
+                                {message.reasoning}
+                            </div>
+                        </details>
+                    )}
+
+                    <div className="prose prose-slate max-w-none">
+                        {message.content ? (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                        ) : (
+                            !message.reasoning && (
+                                <div className="flex items-center gap-2 text-[var(--text-secondary)] py-2">
+                                    <span className="relative flex h-3 w-3">
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--accent-primary)] opacity-75"></span>
+                                        <span className="relative inline-flex rounded-full h-3 w-3 bg-[var(--accent-primary)]"></span>
+                                    </span>
+                                    <span className="text-sm font-medium animate-pulse">思考中...</span>
+                                </div>
+                            )
+                        )}
+                    </div>
+
+                    {/* Sources Island */}
+                    {message.sources && message.sources.length > 0 && (
+                        <div className="mt-6">
+                            <div className="flex items-center gap-2 mb-3 text-xs font-medium text-[var(--text-tertiary)] uppercase tracking-wide">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                                </svg>
+                                参考来源 ({message.sources.length})
+                            </div>
+                            <div className="flex gap-3 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
+                                {message.sources.map((source, idx) => (
+                                    <div
+                                        key={idx}
+                                        onClick={() => setActiveSource(source)}
+                                        className="source-card group transition-all hover:-translate-y-1 cursor-pointer hover:shadow-md hover:border-[var(--accent-primary)]/30 active:scale-95"
+                                    >
+                                        <div className="font-semibold text-[var(--accent-secondary)] mb-1.5 truncate flex items-center gap-1">
+                                            <svg className="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                                            {source.source.replace('.md', '').replace('.pdf', '')}
+                                        </div>
+                                        <div className="text-[var(--text-tertiary)] text-[10px] uppercase font-mono mb-2">
+                                            {source.section || `Chunk ${source.chunk_id}`}
+                                        </div>
+                                        <div className="text-[var(--text-secondary)] line-clamp-3 leading-relaxed">
+                                            {source.content}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Export Buttons */}
+                    {message.content && !isStreaming && (
+                        <ExportButtons
+                            question="" /* Assuming we might not have it in memoized context directly for now, or would need a refactor for ExportButtons args */
+                            answer={message.content}
+                            answerId={`qa-pair-${index}`}
+                        />
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}, (prevProps, nextProps) => {
+    if (prevProps.message._uid !== nextProps.message._uid) return false;
+    if (prevProps.message.content !== nextProps.message.content) return false;
+    if (prevProps.isStreaming !== nextProps.isStreaming) return false;
+    if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;
+    if (prevProps.message.sources !== nextProps.message.sources) return false;
+    return true;
+});

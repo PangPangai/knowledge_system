@@ -1610,11 +1610,50 @@ class AdvancedRAGEngine:
             "skip_generate": True
         }
         
-        # Run LangGraph workflow to get documents (stops before generate if we manually stream)
-        # For simplicity, we run the full workflow first, then stream the generation
-        result = await self.agentic_app.ainvoke(initial_state)
-        documents = result.get("documents", [])
-        route_decision = result.get("route_decision", "")
+        # Initial status before workflow starts
+        yield {
+            "type": "reasoning",
+            "content": "🤔 **节点追踪** | 正在分析问题意图，准备执行智能路由...\n"
+        }
+
+        # Run LangGraph workflow step by step to stream reasoning status
+        final_state = dict(initial_state)
+        
+        async for event in self.agentic_app.astream(initial_state):
+            node_name = list(event.keys())[0]
+            node_state = event[node_name]
+            final_state.update(node_state)
+            
+            # Formulate reasoning text based on the node executed (predicting next step)
+            reasoning_text = ""
+            if node_name == "router":
+                route = node_state.get("route_decision", "unknown")
+                if route == "retrieve":
+                    reasoning_text = "✅ 路由分析完毕：属于领域知识，触发资料查阅动作。\n🔍 **节点追踪** | 正在执行混合知识库检索 (BM25 + 向量检索)..."
+                else:
+                    reasoning_text = "✅ 路由分析完毕：属于通用问题，跳过检索流程。"
+            elif node_name == "retrieve":
+                docs = node_state.get("documents", [])
+                reasoning_text = f"\n✅ 知识检索成功，共召回 {len(docs)} 个粗排阶段候选片段。\n⚖️ **节点追踪** | 正在调用推理模型对文本片段进行精准维度打分及筛选..."
+            elif node_name == "grade":
+                docs = node_state.get("documents", [])
+                decision = node_state.get("grade_decision", "")
+                if decision == "relevant":
+                    reasoning_text = f"\n✅ 验证完成：剔除无用噪声，最终保留 {len(docs)} 个极高价值片段用作生成。"
+                else:
+                    reasoning_text = "\n❌ 验证完成：发现召回片段与原问题相关性过低。\n📝 **节点追踪** | 重写改述原始问题，准备扩大检索面..."
+            elif node_name == "rewrite":
+                new_query = node_state.get("current_query", "")
+                reasoning_text = f"\n🔄 启发式搜索词已优化为: `{new_query}`\n🔍 **节点追踪** | 重新发起二次增强检索..."
+                
+            if reasoning_text:
+                yield {
+                    "type": "reasoning",
+                    "content": reasoning_text + "\n"
+                }
+
+        documents = final_state.get("documents", [])
+        route_decision = final_state.get("route_decision", "")
         
         # Format sources for metadata
         sources = [

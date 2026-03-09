@@ -434,3 +434,33 @@
 - **首字节延迟 (TTFT)**: Agentic 链路整体响应速度由于异步评分的介入，感知延迟降低 40%-50%。
 - **长尾召回率**: 软化过滤策略联手 Reranker，保住了跨工具交叉索引的长尾相关片段，增强回答容错率。
 - **正确性红线**: 来源隔离规则杜绝了最致命的"张冠李戴"式语法错误。
+
+---
+
+## 2026-03-06: 流式渲染性能重构与卡顿修复 (Streaming Render Optimization & Stutter Fix)
+
+### 1. 背景与问题 (Context)
+- **Problem**: 用户在前端界面进行多轮连续提问（例如 6-7 次对话后），系统流式输出的文字在视觉上明显变得卡顿，甚至导致浏览器主线程阻塞。
+- **Root Cause**: `react-markdown` 每次接收到新的文字流时，都会对整个内容重新解析 AST (抽象语法树)。并且原始代码中的状态更新 (`setMessages([...prev, updatedMessage])`) 会触发当前所有历史消息的全局重绘。随着对话轮次增加，React 渲染复杂度呈现 O(n) 爆炸，导致严重的掉帧与卡顿。
+
+### 2. 变更内容 (Changes)
+
+#### [Frontend Chat Interface]
+- **Module**: `frontend/app/components/ChatInterface.tsx`
+- **实施细节 (Technical Details)**:
+    1. **历史消息冻结 (React.memo Isolation)**:
+        - **Detail**: 将单条消息的渲染提取为独立的 `MessageBubble` 组件，并用 `React.memo` 包裹，配合严格的自定义比较函数（仅对 `_uid`, `content`, `isStreaming` 敏感）。
+        - **Logic**: 切断了全局重绘链条。前面几十轮的历史对话彻底被“冷冻”，流式输出时 React 仅对“正在打字”的最后一条消息进行重新计算。重绘复杂度从 O(n) 降纬至 O(1)。
+    2. **稳定唯一的键值追踪 (Stable Unique ID)**:
+        - **Detail**: 引入全局自增 ID 生成器 (`genMsgId()`)，分配给每条消息的 `_uid` 属性，彻底废弃不稳定的 `key={index}` 渲染模式。
+        - **Logic**: 防止 React Reconciliation 在列表刷新时无谓地销毁和重建底层 DOM 节点，精准追踪真实改动。
+    3. **状态函数式累加与闭包逃逸修复 (Functional State Accumulation)**:
+        - **Detail**: 在 Server-Sent Events (SSE) 的接收流中，不依赖外部共享可变的闭包对象，而是采用局部的 `incrementalContent`。
+        - **Logic**: 通过 `setMessages(prev => { ...prevLastMsg, content: prevLastMsg.content + incrementalContent })` 实现最高频的实时追加，防止状态丢失与一次性输出（Stale Closure）。
+    4. **移除平滑滚动动画堆积 (Direct Scroll Operation)**:
+        - **Detail**: 流式传输期间，废弃 `scrollIntoView({ behavior: 'smooth' })`，改用底层的直接赋值 `scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight`。
+        - **Logic**: 规避了极高频率的 SSE 包与浏览器 CSS Smooth Animation 队列的抢占冲突引起的动画掉帧。
+
+### 3. 性能收益 (Impact)
+- **渲染流畅度 (Rendering Fluidity)**: 彻底消除了聊天多轮次后的字数膨胀惩罚，成功在流式输出中维持了实时的 Markdown 语法树全量解析重绘，达成真正的打字机般丝滑观感且性能探底。
+- **CPU 利用率 (CPU Utilization)**: 高频次的渲染负担被精准限制在了个位数节点，浏览器主线程免遭阻塞（Performance 记录下长红色卡顿长条消失）。
