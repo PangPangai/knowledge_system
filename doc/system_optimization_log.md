@@ -464,3 +464,41 @@
 ### 3. 性能收益 (Impact)
 - **渲染流畅度 (Rendering Fluidity)**: 彻底消除了聊天多轮次后的字数膨胀惩罚，成功在流式输出中维持了实时的 Markdown 语法树全量解析重绘，达成真正的打字机般丝滑观感且性能探底。
 - **CPU 利用率 (CPU Utilization)**: 高频次的渲染负担被精准限制在了个位数节点，浏览器主线程免遭阻塞（Performance 记录下长红色卡顿长条消失）。
+
+---
+
+## 2026-03-09: 关键逻辑修复与流式输出全链路优化 (Critical Logics & Streaming Fixes)
+
+### 1. 背景与问题 (Context)
+- **Problem 1 (Logic Vulnerability)**: `Agentic Router` 的子串匹配逻辑过于宽松，导致 LLM 输出 `no_retrieval` 时仍会命中 `retrieve` 字串，造成简单问候语频繁触发无效检索。
+- **Problem 2 (Delete Anomaly)**: 后端删除文档接口永远返回 `True` (即便文件不存在)，且删除内存映射后未同步落盘，导致重启服务后已删除的文件映射“回魂”。
+- **Problem 3 (Reasoning Stutter)**: 复杂问答模式下，前端的“思考过程”面板无法流式显示步骤（如 router -> retrieve），而是长时间等待后一次性突跳。
+
+### 2. 变更内容 (Changes)
+
+#### A. 后端逻辑严谨化 (Backend Robustness)
+- **Module**: `backend/agentic_rag.py`, `backend/rag_engine.py`
+- **实施细节**:
+    1. **Router 精确匹配**: 将 `if "retrieve" in decision` 升级为 `if "no_retrieval" not in decision and "retrieve" in decision`。彻底封堵子串误判漏洞。
+    2. **删除操作原子性**: 
+        - 增加了对 `vectorstore` 的真实存在性检查，当库中无对应 `source` 时返回 `False` 触发前端 `404`。
+        - 关键修复：在内存删除 `parent_docs` 映射后，立即强制调用 `_save_parent_docs()`。闭环了“内存-磁盘”的一致性链路。
+
+#### B. 复杂路径流式输出修复 (End-to-End Streaming Recovery)
+- **Module**: `backend/rag_engine.py`, `frontend/app/components/ChatInterface.tsx`
+- **实施细节**:
+    1. **LangGraph 事件流修正 (Backend)**:
+        - **Problem**: LangGraph `astream` 默认模式在检索路径下会聚合事件，导致中间节点的进度无法被捕捉。
+        - **Solution**: 将 `astream` 调用模式显式修正为 `stream_mode="updates"`。这使得每一步推理（Retrieving, Grading）产生的进度信号能即时通过 SSE 发送到前端。
+    2. **React 渲染性能补坑 (Frontend)**:
+        - **Problem**: `MessageBubble` 组件由于 `React.memo` 的比较逻辑漏掉了对 `reasoning` 字段的监控，导致即使数据到达，界面也因判定为“无变化”而不执行重绘。
+        - **Solution**: 补齐 `memo` 比较函数中的 `reasoning` 校验位。现在思考链条可实现逐条、平滑的弹出效果，无需等待正文生成。
+
+### 3. 性能收益 (Impact)
+- **准确性**: 简单语义（打招呼）不再浪费算力与检索时延。
+- **透明度**: 推理过程从“黑盒突跳”变为“白盒渐进”，用户感知体验发生质变。
+- **一致性**: 维护操作（删除）具备了真实的反馈结果与持久化保障。
+
+### 4. 下一步规划
+- [ ] 考虑引入重排分数阈值，对于极低分召回直接触发 Agent 拒绝生成或深度重写。
+

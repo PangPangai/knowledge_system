@@ -486,6 +486,7 @@ const MessageBubble = React.memo(function MessageBubble({
 }, (prevProps, nextProps) => {
     if (prevProps.message._uid !== nextProps.message._uid) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;
+    if (prevProps.message.reasoning !== nextProps.message.reasoning) return false;
     if (prevProps.isStreaming !== nextProps.isStreaming) return false;
     if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;
     if (prevProps.message.sources !== nextProps.message.sources) return false;

@@ -1440,18 +1440,23 @@ class AdvancedRAGEngine:
         """Delete all chunks of a document from all indices"""
         # Delete from vector store
         results = self.vectorstore.get(where={"source": filename})
+        has_data = False
         
         if results and results.get("ids"):
             self.vectorstore.delete(ids=results["ids"])
+            has_data = True
         
         # Remove from parent docs
         if filename in self.parent_docs:
             del self.parent_docs[filename]
+            self._save_parent_docs()  # Sync to disk
+            has_data = True
         
         # Rebuild BM25 index (simpler than selective removal)
-        self._load_bm25_index()
+        if has_data:
+            self._load_bm25_index()
         
-        return True
+        return has_data
     
     async def list_documents(self) -> List[Dict]:
         """List all documents in the knowledge base"""
@@ -1619,7 +1624,7 @@ class AdvancedRAGEngine:
         # Run LangGraph workflow step by step to stream reasoning status
         final_state = dict(initial_state)
         
-        async for event in self.agentic_app.astream(initial_state):
+        async for event in self.agentic_app.astream(initial_state, stream_mode="updates"):
             node_name = list(event.keys())[0]
             node_state = event[node_name]
             final_state.update(node_state)

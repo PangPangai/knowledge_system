@@ -64,7 +64,7 @@ class AgenticRAGGraph:
         response = await self.rag_engine.llm.ainvoke(router_prompt)
         decision = response.content.strip().lower()
         
-        if "retrieve" in decision:
+        if "no_retrieval" not in decision and "retrieve" in decision:
             state["route_decision"] = "retrieve"
         else:
             state["route_decision"] = "generate"
