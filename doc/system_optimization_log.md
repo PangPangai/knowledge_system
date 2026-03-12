@@ -502,3 +502,41 @@
 ### 4. 下一步规划
 - [ ] 考虑引入重排分数阈值，对于极低分召回直接触发 Agent 拒绝生成或深度重写。
 
+
+---
+
+## 2026-03-12: 流式输出自动滚动策略优化（用户滚动优先）
+
+### 1. 背景与问题 (Context)
+- **Problem**: 在回答流式输出期间，消息区会在每次增量渲染时强制滚动到底部，导致用户一旦向上滚动查看历史内容，仍会被持续“拉回底部”。
+- **Root Cause**: 自动滚动逻辑仅依赖 `messages/isStreaming` 变化触发，缺少“用户是否仍停留在底部附近”的状态判定，属于程序滚动与用户滚动意图未隔离。
+
+### 2. 变更内容 (Changes)
+
+#### [Chat Scroll Controller]
+- **Module**: `frontend/app/components/ChatInterface.tsx`
+- **实施细节 (Technical Details)**:
+    1. **自动滚动阈值门控**:
+        - **Detail**: 新增常量 `AUTO_SCROLL_THRESHOLD_PX = 80`。
+        - **Logic**: 使用距离底部计算公式 `distanceFromBottom = scrollHeight - (scrollTop + clientHeight)`；仅当 `distanceFromBottom <= 80` 时保持自动滚动开启。
+    2. **用户滚动意图检测**:
+        - **Detail**: 新增 `autoScrollEnabledRef`，并在消息容器绑定 `onScroll={updateAutoScrollState}`。
+        - **Logic**: 用户向上滚动后 `autoScrollEnabledRef=false`，流式增量更新期间不再强制 `scrollTop=scrollHeight`；用户回到底部后自动恢复跟随。
+    3. **滚动调度优化（减少抖动）**:
+        - **Detail**: 将滚动执行包裹到 `requestAnimationFrame`，并通过 `rafRef` 进行取消/清理。
+        - **Logic**: 合并高频渲染周期内的滚动写操作，避免重复布局与滚动竞争，降低流式输出阶段的视觉抖动。
+    4. **会话起点重置策略**:
+        - **Detail**: 在 `handleSubmit` 和会话切换时重置 `autoScrollEnabledRef.current = true`。
+        - **Logic**: 新问题开始时默认跟随最新输出，符合聊天产品常规交互预期。
+
+#### [Type Safety Cleanup]
+- **Module**: `frontend/app/components/ChatInterface.tsx`
+- **实施细节 (Technical Details)**:
+    1. 新增 `type HistoryMessage = Omit<Message, '_uid'>`，替换 `history` 加载处的 `any`。
+    2. 将 `assistantMessage` 从 `let` 调整为 `const`，消除 `prefer-const` 违规。
+
+### 3. 性能收益 (Impact)
+- **交互稳定性**: 用户向上查看历史时不再被流式输出强制打断，滚动控制权从“程序优先”改为“用户优先”。
+- **渲染平滑度**: `requestAnimationFrame` 调度减少滚动抖动与重复写入风险。
+- **质量收益**: 同文件的关键 lint 问题（`no-explicit-any` / `prefer-const`）已清理，降低后续维护噪声。
+- **性能数据**: Pending measurement（尚未进行 FPS/主线程耗时的量化对比）。

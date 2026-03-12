@@ -22,9 +22,12 @@ interface Message {
     sources?: Source[];
 }
 
+type HistoryMessage = Omit<Message, '_uid'>;
+
 // Global counter for stable message IDs
 let msgCounter = 0;
 const genMsgId = () => `msg-${++msgCounter}`;
+const AUTO_SCROLL_THRESHOLD_PX = 80;
 
 interface ChatInterfaceProps {
     conversationId: string | null;
@@ -43,6 +46,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const rafRef = useRef<number | null>(null);
     const prevMsgCountRef = useRef(0);
+    const autoScrollEnabledRef = useRef(true);
 
     // Auto-resize textarea
     useEffect(() => {
@@ -54,6 +58,8 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
 
     // Fetch messages when conversation ID changes (skip during streaming to prevent override)
     useEffect(() => {
+        autoScrollEnabledRef.current = true;
+
         const fetchMessages = async () => {
             // Skip fetching during streaming - local state is authoritative
             if (isStreaming) {
@@ -68,8 +74,8 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
             try {
                 const res = await fetch(`http://localhost:8000/history/${conversationId}`);
                 if (res.ok) {
-                    const data = await res.json();
-                    setMessages(data.map((m: any) => ({ ...m, _uid: genMsgId() })));
+                    const data: HistoryMessage[] = await res.json();
+                    setMessages(data.map((m) => ({ ...m, _uid: genMsgId() })));
                 }
             } catch (error) {
                 console.error("Failed to load conversation", error);
@@ -79,20 +85,44 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
         fetchMessages();
     }, [conversationId, isStreaming]);
 
+    const updateAutoScrollState = () => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+
+        const distanceFromBottom = container.scrollHeight - (container.scrollTop + container.clientHeight);
+        autoScrollEnabledRef.current = distanceFromBottom <= AUTO_SCROLL_THRESHOLD_PX;
+    };
+
     // Scroll to bottom and track message count
     useEffect(() => {
         prevMsgCountRef.current = messages.length;
 
         const container = scrollContainerRef.current;
         if (!container) return;
+        if (!autoScrollEnabledRef.current) return;
 
-        if (isStreaming) {
-            // During streaming: instant scroll, no animation overhead
-            container.scrollTop = container.scrollHeight;
-        } else {
-            // After streaming: smooth scroll for polish
-            container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        if (rafRef.current !== null) {
+            cancelAnimationFrame(rafRef.current);
         }
+
+        rafRef.current = requestAnimationFrame(() => {
+            if (isStreaming) {
+                // During streaming: instant scroll, no animation overhead
+                container.scrollTop = container.scrollHeight;
+            } else {
+                // After streaming: smooth scroll for polish
+                container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+            }
+
+            rafRef.current = null;
+        });
+
+        return () => {
+            if (rafRef.current !== null) {
+                cancelAnimationFrame(rafRef.current);
+                rafRef.current = null;
+            }
+        };
     }, [messages, isLoading, isStreaming]);
 
     const handleSubmit = async (e?: React.FormEvent) => {
@@ -102,6 +132,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
         const currentInput = input;
         setInput('');
         if (textareaRef.current) textareaRef.current.style.height = 'auto'; // Reset height
+        autoScrollEnabledRef.current = true;
 
         const userMessage: Message = { _uid: genMsgId(), role: 'user', content: currentInput };
         setMessages(prev => [...prev, userMessage]);
@@ -128,7 +159,7 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
             if (!reader) throw new Error('No reader available');
 
             const decoder = new TextDecoder();
-            let assistantMessage: Message = { _uid: genMsgId(), role: 'assistant', content: '', sources: [] };
+            const assistantMessage: Message = { _uid: genMsgId(), role: 'assistant', content: '', sources: [] };
             setMessages(prev => [...prev, assistantMessage]);
 
             let buffer = '';
@@ -223,7 +254,11 @@ export default function ChatInterface({ conversationId, onConversationIdChange }
     return (
         <div className="flex flex-col h-full relative">
             {/* Messages Container - min-h-0 enables flex child scrolling, pb-52 for input area */}
-            <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto pt-8 pb-52 scroll-smooth-disabled">
+            <div
+                ref={scrollContainerRef}
+                onScroll={updateAutoScrollState}
+                className="flex-1 min-h-0 overflow-y-auto pt-8 pb-52 scroll-smooth-disabled"
+            >
                 {messages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-full text-center px-6 animate-slide-up">
                         <div className="w-20 h-20 bg-gradient-to-br from-[var(--accent-primary)] to-[var(--accent-secondary)] rounded-[2rem] flex items-center justify-center shadow-[var(--shadow-island)] mb-8">
