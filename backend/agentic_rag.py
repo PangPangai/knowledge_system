@@ -104,7 +104,7 @@ class AgenticRAGGraph:
         # 4. Rerank (Global Rerank)
         if self.rag_engine.rerank_enabled and len(all_documents) > 0:
             # Rerank candidates to get configured top-n
-            documents = self.rag_engine._rerank_documents(query, all_documents, top_n=self.rag_engine.rerank_top_n)
+            documents = await self.rag_engine._rerank_documents(query, all_documents, top_n=self.rag_engine.rerank_top_n)
         else:
             documents = all_documents[:self.rag_engine.rerank_top_n]
         

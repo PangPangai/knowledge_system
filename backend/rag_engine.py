@@ -49,6 +49,8 @@ class SiliconFlowReranker:
         self.api_key = api_key
         self.api_base = api_base.rstrip('/')
         self.model = model
+        self.timeout_seconds = float(os.getenv("RERANK_TIMEOUT_SECONDS", "12"))
+        self.max_doc_chars = int(os.getenv("RERANK_MAX_DOC_CHARS", "4000"))
     
     def rerank(self, query: str, documents: List[str], top_n: int = 5) -> List[Tuple[int, float]]:
         """
@@ -102,6 +104,81 @@ class SiliconFlowReranker:
         except Exception as e:
             print(f"   ⚠️ SiliconFlow Rerank error: {e}, falling back to original order")
             return [(i, 1.0 - i * 0.01) for i in range(min(top_n, len(documents)))]
+
+    def _tokenize_for_fallback(self, text: str) -> List[str]:
+        return re.findall(r"[\w\u4e00-\u9fff]+", text.lower())
+
+    def _keyword_fallback(self, query: str, documents: List[str], top_n: int) -> List[Tuple[int, float]]:
+        query_tokens = set(self._tokenize_for_fallback(query))
+        if not query_tokens:
+            return []
+
+        scored: List[Tuple[int, float]] = []
+        for idx, doc in enumerate(documents):
+            doc_tokens = set(self._tokenize_for_fallback(doc))
+            overlap = len(query_tokens & doc_tokens)
+            if overlap <= 0:
+                continue
+            score = overlap / max(1, len(query_tokens))
+            scored.append((idx, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_n]
+
+    async def rerank_async(self, query: str, documents: List[str], top_n: int = 5) -> List[Tuple[int, float]]:
+        """
+        Async rerank with layered fallback:
+        1) Remote rerank API (strict timeout)
+        2) Local keyword-overlap scoring
+        3) Original retrieval order
+        """
+        if not documents:
+            return []
+
+        capped_docs = [d[:self.max_doc_chars] for d in documents] if self.max_doc_chars > 0 else documents
+        url = f"{self.api_base}/rerank"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "model": self.model,
+                        "query": query,
+                        "documents": capped_docs,
+                        "top_n": top_n,
+                        "return_documents": False,
+                        "max_chunks_per_doc": 1024
+                    },
+                )
+                response.raise_for_status()
+
+            result = response.json()
+            scores = []
+            for item in result.get("results", []):
+                scores.append((item["index"], item["relevance_score"]))
+            scores.sort(key=lambda x: x[1], reverse=True)
+            if scores:
+                print(f"   ✅ Async rerank completed: {len(scores)} results, top score: {scores[0][1]:.4f}")
+            return scores[:top_n]
+
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            print(f"   ⚠️ Async rerank timeout/request error: {e}. Falling back to keyword overlap.")
+        except Exception as e:
+            print(f"   ⚠️ Async rerank API error: {e}. Falling back to keyword overlap.")
+
+        keyword_scores = self._keyword_fallback(query, capped_docs, top_n)
+        if keyword_scores:
+            print(f"   ℹ️ Async rerank fallback: keyword overlap ({len(keyword_scores)} results)")
+            return keyword_scores
+
+        print("   ℹ️ Async rerank fallback: original retrieval order")
+        return [(i, 1.0 - i * 0.01) for i in range(min(top_n, len(capped_docs)))]
 
 
 class ZhipuReranker:
@@ -226,7 +303,40 @@ class BM25Index:
         except Exception as e:
             print(f"   ⚠️ Failed to save BM25 index: {e}")
 
-    def load(self, expected_count: int = -1) -> bool:
+    @staticmethod
+    def compute_ids_hash(doc_ids: List[str]) -> str:
+        """Compute order-insensitive fingerprint from ids/keys."""
+        if not doc_ids:
+            return ""
+        hasher = hashlib.md5()
+        for doc_id in sorted(str(x) for x in doc_ids):
+            hasher.update(doc_id.encode("utf-8", errors="ignore"))
+            hasher.update(b"\n")
+        return hasher.hexdigest()
+
+    @staticmethod
+    def build_stable_keys(metadatas: List[Dict], fallback_ids: Optional[List[str]] = None) -> List[str]:
+        """
+        Build stable per-document keys from metadata.
+        Falls back to ids/index when metadata fields are missing.
+        """
+        keys: List[str] = []
+        fallback_ids = fallback_ids or []
+        for idx, meta in enumerate(metadatas):
+            m = meta if isinstance(meta, dict) else {}
+            source = str(m.get("source", ""))
+            chunk_id = str(m.get("chunk_id", ""))
+            parent_id = str(m.get("parent_id", ""))
+
+            if source or chunk_id or parent_id:
+                keys.append(f"{source}::{chunk_id}::{parent_id}")
+            elif idx < len(fallback_ids):
+                keys.append(str(fallback_ids[idx]))
+            else:
+                keys.append(str(idx))
+        return keys
+
+    def load(self, expected_count: int = -1, expected_ids_hash: str = "") -> bool:
         """
         Load BM25 index from disk.
         
@@ -251,6 +361,25 @@ class BM25Index:
             if expected_count >= 0 and cached_len != expected_count:
                 print(f"   ⚠️ BM25 Cache mismatch: Cache={cached_len}, DB={expected_count}. Rebuilding...")
                 return False
+
+            # 2. Fingerprint check (detect stale cache with same count)
+            cached_hash = data.get("ids_hash", "")
+            needs_hash_migration_save = False
+            if expected_ids_hash and cached_hash and cached_hash != expected_ids_hash:
+                # Backward-compatible migration for legacy cache hash algorithm.
+                migrated_hash = self.compute_ids_hash(
+                    self.build_stable_keys(
+                        data.get("metadatas", []),
+                        data.get("doc_ids", [])
+                    )
+                )
+                if migrated_hash == expected_ids_hash:
+                    data["ids_hash"] = migrated_hash
+                    needs_hash_migration_save = True
+                    print("   ℹ️ BM25 Cache hash migrated to stable format.")
+                else:
+                    print("   ⚠️ BM25 Cache id hash mismatch. Rebuilding...")
+                    return False
                 
             # restore state
             self.documents = data["documents"]
@@ -258,6 +387,10 @@ class BM25Index:
             self.metadatas = data["metadatas"]
             self.ids_hash = data.get("ids_hash", "")
             self.bm25 = data["bm25"]
+
+            if needs_hash_migration_save:
+                # Persist migrated hash so next startup can hit cache directly.
+                self.save()
             
             print(f"   ⚡ BM25 Index loaded from cache ({cached_len} docs, {time.time()-start_time:.2f}s)")
             return True
@@ -278,6 +411,26 @@ class BM25Index:
         
         self._rebuild_index()
         self.save() # Auto-save after modification
+
+    def replace_documents(self, documents: List[Document]):
+        """Replace all documents in BM25 index and persist."""
+        self.documents = []
+        self.doc_ids = []
+        self.metadatas = []
+        self.bm25 = None
+        self.ids_hash = ""
+
+        if not documents:
+            self.save()
+            return
+
+        for doc in documents:
+            self.documents.append(doc.page_content)
+            self.doc_ids.append(doc.metadata.get("id", str(len(self.doc_ids))))
+            self.metadatas.append(doc.metadata)
+
+        self._rebuild_index()
+        self.save()
     
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize text using jieba with EDA domain dictionary"""
@@ -292,12 +445,12 @@ class BM25Index:
             self.ids_hash = ""
             return
         
-        # Update hash for integrity check
-        # (Simple concatenation hash of first and last few IDs to detect shifts)
-        if self.doc_ids:
-            # Use a sampling strategy for speed: first 10, middle 10, last 10
-            sample_ids = self.doc_ids[:10] + self.doc_ids[len(self.doc_ids)//2 : len(self.doc_ids)//2+10] + self.doc_ids[-10:]
-            self.ids_hash = hashlib.md5("".join(sample_ids).encode()).hexdigest()
+        # Update hash for integrity check (metadata-based, order-insensitive)
+        if self.metadatas:
+            stable_keys = self.build_stable_keys(self.metadatas, self.doc_ids)
+            self.ids_hash = self.compute_ids_hash(stable_keys)
+        else:
+            self.ids_hash = self.compute_ids_hash(self.doc_ids)
             
         tokenized_docs = [self._tokenize(doc) for doc in self.documents]
         self.bm25 = BM25Okapi(tokenized_docs)
@@ -656,14 +809,22 @@ class AdvancedRAGEngine:
         """Load existing documents into BM25 index (from Cache or DB)"""
         try:
             collection = self.vectorstore._collection
-            db_doc_count = collection.count() # Fast count check
+            id_payload = collection.get(include=["metadatas"])
+            db_ids = id_payload.get("ids", []) if id_payload else []
+            db_metadatas = id_payload.get("metadatas", []) if id_payload else []
+            db_doc_count = len(db_ids) if db_ids else len(db_metadatas)
+            stable_db_keys = BM25Index.build_stable_keys(db_metadatas, db_ids)
+            expected_ids_hash = BM25Index.compute_ids_hash(stable_db_keys)
             
             # Try loading from cache first
-            if self.bm25_index.load(expected_count=db_doc_count):
+            if self.bm25_index.load(
+                expected_count=db_doc_count,
+                expected_ids_hash=expected_ids_hash
+            ):
                 return
                 
             # Fallback: Full Rebuild from DB
-            print(f"   ⚠️ Cache miss or valid. Rebuilding BM25 Index from DB ({db_doc_count} docs)...")
+            print(f"   ⚠️ Cache miss or stale. Rebuilding BM25 Index from DB ({db_doc_count} docs)...")
             all_docs = collection.get(include=["documents", "metadatas"])
             
             if all_docs and all_docs.get("documents"):
@@ -677,8 +838,11 @@ class AdvancedRAGEngine:
                         all_docs.get("metadatas", [{}] * len(all_docs["documents"]))
                     )
                 ]
-                self.bm25_index.add_documents(docs) # Warning: This will trigger save()
+                self.bm25_index.replace_documents(docs)
                 print(f"   BM25 Index rebuilt: {len(docs)} documents")
+            else:
+                self.bm25_index.clear()
+                print("   BM25 Index cleared (no documents in vector store)")
         except Exception as e:
             print(f"   BM25 Index loading failed: {e}")
     
@@ -998,7 +1162,7 @@ class AdvancedRAGEngine:
         except (ValueError, TypeError):
             return (0.5, 0.5)
     
-    def _rerank_documents(self, query: str, documents: List[Document], top_n: int) -> List[Document]:
+    async def _rerank_documents(self, query: str, documents: List[Document], top_n: int) -> List[Document]:
         """
         Rerank documents using the reranker.
         Stores rerank_score in doc.metadata for downstream confidence thresholding.
@@ -1007,7 +1171,11 @@ class AdvancedRAGEngine:
             return documents[:top_n]
         
         doc_contents = [doc.page_content for doc in documents]
-        reranked = self.reranker.rerank(query, doc_contents, top_n=top_n)
+        if hasattr(self.reranker, "rerank_async"):
+            reranked = await self.reranker.rerank_async(query, doc_contents, top_n=top_n)
+        else:
+            # Compatibility path for synchronous reranker implementations
+            reranked = await asyncio.to_thread(self.reranker.rerank, query, doc_contents, top_n)
         
         result = []
         for idx, score in reranked:
@@ -1308,7 +1476,7 @@ class AdvancedRAGEngine:
         # Step 2: Rerank
         if self.rerank_enabled and self.reranker:
             print(f"🎯 Reranking to top {self.rerank_top_n}...")
-            top_docs = self._rerank_documents(question, candidates, self.rerank_top_n)  # Use original question for rerank
+            top_docs = await self._rerank_documents(question, candidates, self.rerank_top_n)  # Use original question for rerank
         else:
             top_docs = candidates[:self.rerank_top_n]
         
@@ -1486,6 +1654,7 @@ class AdvancedRAGEngine:
         
         # Clear parent docs
         self.parent_docs = {}
+        self._save_parent_docs()
         
         print("🗑️ All data cleared from knowledge base")
 

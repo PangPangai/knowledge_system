@@ -579,3 +579,58 @@
 - **类型安全**: 导出链路从“忽略类型”迁移到“显式类型边界”，降低后续回归风险。
 - **可维护性**: 清除 `any/@ts-ignore` 与 hooks 规则违例后，后续修改可直接受益于静态检查。
 - **性能数据**: Pending measurement（本次优化以代码质量与规范收敛为主，未引入性能基准压测）。
+
+---
+
+## 2026-03-12: BM25 一致性修复与 Reranker 容灾分层 (BM25 Consistency & Reranker Resilience)
+
+### 1. 背景与问题 (Context)
+- **Problem 1 (BM25 缓存误判与重复重建)**: 旧策略主要按文档数量判断 BM25 缓存是否可用，遇到切片粒度调整、文档顺序变化或同数不同内容时，可能出现“该重建不重建”或“无需重建却重建”的一致性问题。
+- **Problem 2 (`clear_all` 持久化缺口)**: `clear_all` 仅清空内存 `parent_docs`，未立即落盘，`parent_docs.json` 可能残留旧数据，导致重启后状态回魂。
+- **Problem 3 (Reranker 单点脆弱性)**: 远程 reranker 走同步调用，缺少超时与分层回退。一旦网络抖动或服务超时，检索链路会被拖慢甚至阻塞。
+
+### 2. 变更内容 (Changes)
+
+#### A. BM25 一致性校验升级
+- **Module**: `backend/rag_engine.py`
+- **实施细节 (Technical Details)**:
+    1. 新增 `BM25Index.build_stable_keys()`：从 metadata 提取稳定主键（`source/chunk_id/parent_id`）构建切片标识。
+    2. 新增 `BM25Index.compute_ids_hash()`：对稳定主键排序后计算 hash，做到**顺序无关**、同集合同签名。
+    3. `BM25Index.load()` 增加 `expected_ids_hash` 校验参数，并加入旧格式 hash 的兼容迁移路径，避免可复用缓存被误判为失效。
+
+#### B. BM25 重建语义修正
+- **Module**: `backend/rag_engine.py`
+- **实施细节 (Technical Details)**:
+    1. 新增 `BM25Index.replace_documents()`，重建时先替换文档集合再重建索引。
+    2. 将原先可能导致累计漂移的追加式更新（`add_documents`）改为替换式更新，防止内存索引与当前向量库切片集不一致。
+
+#### C. `clear_all` 一致性闭环
+- **Module**: `backend/rag_engine.py`
+- **实施细节 (Technical Details)**:
+    1. `clear_all()` 在清空内存映射后立即调用 `_save_parent_docs()`。
+    2. 确保“内存状态 = 磁盘状态”，避免重启后旧 `parent_docs.json` 回流。
+
+#### D. Reranker 异步化 + 超时 + 分层回退
+- **Module**: `backend/rag_engine.py`, `backend/agentic_rag.py`
+- **实施细节 (Technical Details)**:
+    1. 新增异步重排入口 `rerank_async`，远程调用纳入超时控制（`RERANK_TIMEOUT_SECONDS`）。
+    2. 新增文档截断保护（`RERANK_MAX_DOC_CHARS`），防止超长上下文放大远程延迟。
+    3. 回退策略分层：
+        - 第一层：远程 reranker（正常路径）。
+        - 第二层：本地关键词重叠重排（`_keyword_fallback`）。
+        - 第三层：保持原检索顺序返回（兜底不阻塞）。
+    4. 标准 RAG 与 Agentic RAG 调用链均改为 `await` 异步重排，保证链路一致。
+
+### 3. 性能收益 (Impact)
+- **启动稳定性**: 数据库未变化时继续命中 BM25 磁盘缓存，避免每次启动都重建；仅在切片集合真实变化时才触发重建。
+- **一致性**: 修复 `clear_all` 后重启回魂问题，清空动作具备可持久追溯性。
+- **鲁棒性**: 远程 reranker 异常不会拖垮主流程，检索链路具备可降级能力，尾延迟更可控。
+- **质量可控**: 回退到本地关键词重排时仍保留一定排序能力，优于直接原序返回。
+
+### 4. 风险与验证 (Risk & Validation)
+- **兼容性说明**: 首次加载可能出现一次性 hash 迁移日志；迁移完成后在数据不变场景下应稳定命中缓存。
+- **已完成验证**: 相关改动文件已通过 `py_compile` 语法检查。
+- **建议回归项**:
+  1. 冷启动两次，确认第二次命中 BM25 缓存。
+  2. 执行 `clear_all` 后重启，确认 `parent_docs.json` 保持空状态。
+  3. 人工制造 reranker 超时，确认可自动退化至本地重排/原序兜底。
