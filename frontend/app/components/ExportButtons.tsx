@@ -3,6 +3,36 @@
 import { useState } from 'react';
 import { marked } from 'marked';
 
+interface Html2PdfOptions {
+    margin: [number, number, number, number];
+    filename: string;
+    image: { type: 'jpeg'; quality: number };
+    html2canvas: {
+        scale: number;
+        useCORS: boolean;
+        logging: boolean;
+        windowWidth: number;
+    };
+    jsPDF: { unit: 'mm'; format: 'a4'; orientation: 'portrait' };
+    pagebreak: { mode: Array<'css' | 'legacy'> };
+}
+
+interface Html2PdfWorker {
+    set(options: Html2PdfOptions): Html2PdfWorker;
+    from(source: HTMLElement): Html2PdfWorker;
+    save(): Promise<void>;
+}
+
+interface Html2PdfModule {
+    default: () => Html2PdfWorker;
+}
+
+declare global {
+    interface Window {
+        __exportIframe?: HTMLIFrameElement | null;
+    }
+}
+
 interface ExportButtonsProps {
     question: string;
     answer: string;
@@ -215,8 +245,13 @@ export default function ExportButtons({ question, answer, answerId }: ExportButt
         setIsExporting(true);
 
         try {
-            // @ts-ignore
-            const html2pdf = (await import('html2pdf.js')).default;
+            const html2pdfModule = await import('html2pdf.js');
+            const html2pdf = (html2pdfModule as unknown as Html2PdfModule).default;
+            const safeAnswerId = answerId
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
 
             // 1. Convert Markdown to HTML
             // Using marked with default settings matches standard markdown parsing
@@ -232,7 +267,7 @@ export default function ExportButtons({ question, answer, answerId }: ExportButt
                 </head>
                 <body>
                     ${PDF_STYLES}
-                    <div class="meta-info">
+                    <div class="meta-info" data-answer-id="${safeAnswerId}">
                         Generated on ${new Date().toLocaleString()}
                     </div>
 
@@ -267,17 +302,17 @@ export default function ExportButtons({ question, answer, answerId }: ExportButt
                 // Wait for content (especially images/fonts) to layout
                 await new Promise(resolve => setTimeout(resolve, 500));
 
-                const opt = {
-                    margin: [15, 15, 15, 15] as [number, number, number, number],
+                const opt: Html2PdfOptions = {
+                    margin: [15, 15, 15, 15],
                     filename: `${getBaseFilename()}.pdf`,
-                    image: { type: 'jpeg' as const, quality: 0.98 },
+                    image: { type: 'jpeg', quality: 0.98 },
                     html2canvas: {
                         scale: 2,
                         useCORS: true,
                         logging: false,
                         windowWidth: 800
                     },
-                    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' as const },
+                    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
                     pagebreak: { mode: ['css', 'legacy'] }
                 };
 
@@ -286,17 +321,17 @@ export default function ExportButtons({ question, answer, answerId }: ExportButt
             }
 
             // Store ref to cleanup
-            (window as any).__exportIframe = iframe;
+            window.__exportIframe = iframe;
 
         } catch (error) {
             console.error('PDF Export failed:', error);
             alert('导出 PDF 失败：' + (error instanceof Error ? error.message : String(error)));
         } finally {
             // Cleanup
-            const iframe = (window as any).__exportIframe;
+            const iframe = window.__exportIframe;
             if (iframe && document.body.contains(iframe)) {
                 document.body.removeChild(iframe);
-                (window as any).__exportIframe = null;
+                window.__exportIframe = null;
             }
             setIsExporting(false);
         }

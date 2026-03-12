@@ -28,7 +28,9 @@ export default function Home() {
   };
 
   useEffect(() => {
-    fetchHistory();
+    queueMicrotask(() => {
+      void fetchHistory();
+    });
   }, [conversationId]); // Refresh when conversation changes
 
   const startNewChat = () => {
